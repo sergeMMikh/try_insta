@@ -3,95 +3,67 @@ import sys
 import requests
 from dotenv import load_dotenv
 
-load_dotenv()
-
-TOKEN = os.getenv("META_ACCESS_TOKEN")
-VER = os.getenv("GRAPH_VERSION", "v19.0")
-
-if not TOKEN:
-    print("Нет META_ACCESS_TOKEN в .env")
-    sys.exit(1)
-
-BASE = f"https://graph.facebook.com/{VER}"
+GRAPH = "https://graph.facebook.com/v25.0"
 
 
-def gget(path: str, params: dict | None = None) -> dict:
-    if params is None:
-        params = {}
-    params["access_token"] = TOKEN
-    r = requests.get(f"{BASE}{path}", params=params, timeout=30)
-    try:
-        data = r.json()
-    except Exception:
-        print("Не смог распарсить JSON:", r.text)
-        raise
-    if r.status_code >= 400 or "error" in data:
-        raise RuntimeError(f"API error: {data}")
+def gget(path, token, params=None):
+    params = params or {}
+    params["access_token"] = token
+    r = requests.get(f"{GRAPH}/{path.lstrip('/')}", params=params, timeout=30)
+    data = r.json()
+    if "error" in data:
+        raise RuntimeError(data["error"])
     return data
 
 
 def main():
-    # 1) Получаем Facebook Pages, которыми ты управляешь
-    pages = gget("/me/accounts", params={"fields": "id,name"})
-    if "data" not in pages or not pages["data"]:
-        print("Не нашёл Pages. Нужна Facebook Page и права pages_show_list.")
-        return
+    load_dotenv()
 
-    page = pages["data"][0]
-    page_id = page["id"]
-    print(f"✅ Page: {page['name']} ({page_id})")
+    page_id = os.getenv("FB_PAGE_ID")
+    page_token = os.getenv("FB_PAGE_ACCESS_TOKEN")
 
-    # 2) Получаем привязанный Instagram business account
-    page_info = gget(f"/{page_id}", params={"fields": "instagram_business_account"})
-    iba = page_info.get("instagram_business_account")
-    if not iba or "id" not in iba:
-        print("❌ У этой Page нет привязанного Instagram Business/Creator аккаунта.")
-        print("Нужно привязать IG к Page в настройках проф. аккаунта.")
-        return
+    if not page_id or not page_token:
+        print("Нет FB_PAGE_ID или FB_PAGE_ACCESS_TOKEN в .env")
+        sys.exit(1)
 
-    ig_user_id = iba["id"]
-    print(f"✅ IG User ID: {ig_user_id}")
+    # 1) Получаем IG User ID, привязанный к Page
+    page = gget(
+        f"{page_id}", page_token, params={"fields": "instagram_business_account"}
+    )
+    ig = page.get("instagram_business_account", {})
+    ig_user_id = ig.get("id")
+    if not ig_user_id:
+        print(
+            "Не найден instagram_business_account. Проверь, что IG профессиональный и привязан к этой Page."
+        )
+        print("Ответ:", page)
+        sys.exit(1)
 
-    # 3) Получаем список медиа (в т.ч. Reels/видео)
+    print("IG_USER_ID:", ig_user_id)
+
+    # 2) Берём список медиа и ищем первое VIDEO
     media = gget(
-        f"/{ig_user_id}/media",
+        f"{ig_user_id}/media",
+        page_token,
         params={
-            "fields": "id,caption,media_type,media_url,permalink,timestamp,thumbnail_url",
+            "fields": "id,media_type,permalink,media_url,thumbnail_url,timestamp,caption",
             "limit": 25,
         },
     )
 
     items = media.get("data", [])
-    if not items:
-        print("❌ Нет медиа или нет прав instagram_basic.")
-        return
+    video = next((m for m in items if m.get("media_type") == "VIDEO"), None)
+    if not video:
+        print("Видео не найдено в последних 25 публикациях.")
+        print("Первые элементы:", items[:3])
+        sys.exit(0)
 
-    # Берём первое REELS/VIDEO, иначе просто первое
-    pick = None
-    for it in items:
-        if it.get("media_type") in ("REELS", "VIDEO"):
-            pick = it
-            break
-    if not pick:
-        pick = items[0]
-
-    print("\n🎬 Нашёл медиа:")
-    print("media_id   :", pick.get("id"))
-    print("type       :", pick.get("media_type"))
-    print("permalink  :", pick.get("permalink"))
-    print("timestamp  :", pick.get("timestamp"))
-    cap = (pick.get("caption") or "").strip()
-    print("caption    :", (cap[:160] + "…") if len(cap) > 160 else cap)
-
-    # Если хочешь — можно дополнительно запросить детальнее по конкретному media_id
-    media_id = pick["id"]
-    details = gget(
-        f"/{media_id}",
-        params={
-            "fields": "id,media_type,media_url,permalink,caption,timestamp,thumbnail_url"
-        },
-    )
-    print("\n📎 details.media_url:", details.get("media_url"))
+    print("\n=== ONE VIDEO ===")
+    print("id:", video.get("id"))
+    print("timestamp:", video.get("timestamp"))
+    print("permalink:", video.get("permalink"))
+    print("media_url:", video.get("media_url"))
+    print("caption:", (video.get("caption") or "")[:120])
 
 
 if __name__ == "__main__":
