@@ -26,22 +26,35 @@ async def on_startup() -> None:
     logger.info("Instagram webhook service started")
 
 
+@app.get("/")
 @app.get("/webhook")
 async def verify_webhook(
+    request: Request,
     hub_mode: str = Query("", alias="hub.mode"),
     hub_verify_token: str = Query("", alias="hub.verify_token"),
     hub_challenge: str = Query("", alias="hub.challenge"),
+    hub_mode_alt: str = Query("", alias="hub_mode"),
+    hub_verify_token_alt: str = Query("", alias="hub_verify_token"),
+    hub_challenge_alt: str = Query("", alias="hub_challenge"),
 ) -> PlainTextResponse:
+    # Meta usually sends dotted params (hub.mode), but occasionally integrations
+    # pass underscore aliases. Accept both to avoid flaky verification failures.
+    del request
+    mode_value = hub_mode or hub_mode_alt
+    verify_token_value = hub_verify_token or hub_verify_token_alt
+    challenge_value = hub_challenge or hub_challenge_alt
+
     expected_token = (os.getenv("META_VERIFY_TOKEN") or "").strip()
     if not expected_token:
         raise HTTPException(status_code=500, detail="META_VERIFY_TOKEN is not configured")
 
-    if hub_mode != "subscribe" or hub_verify_token != expected_token:
+    if mode_value != "subscribe" or verify_token_value != expected_token:
         raise HTTPException(status_code=403, detail="Webhook verification failed")
 
-    return PlainTextResponse(hub_challenge)
+    return PlainTextResponse(challenge_value)
 
 
+@app.post("/")
 @app.post("/webhook")
 async def receive_webhook(request: Request) -> JSONResponse:
     raw_body = await request.body()
