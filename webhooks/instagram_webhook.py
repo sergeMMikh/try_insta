@@ -15,7 +15,7 @@ from integrations.instagram import extract_comment_tasks
 
 logger = logging.getLogger(__name__)
 
-load_dotenv()
+load_dotenv(override=True)
 
 app = FastAPI(title="Instagram Webhook", version="0.1.0")
 
@@ -23,7 +23,13 @@ app = FastAPI(title="Instagram Webhook", version="0.1.0")
 @app.on_event("startup")
 async def on_startup() -> None:
     ensure_tables()
-    logger.info("Instagram webhook service started")
+    app_secret = (os.getenv("META_APP_SECRET") or "").strip()
+    logger.warning(
+        "Instagram webhook service started; META_VERIFY_TOKEN configured=%s; META_APP_SECRET configured=%s; META_APP_SECRET fingerprint=%s",
+        bool((os.getenv("META_VERIFY_TOKEN") or "").strip()),
+        bool(app_secret),
+        _secret_fingerprint(app_secret),
+    )
 
 
 @app.get("/")
@@ -46,11 +52,24 @@ async def verify_webhook(
 
     expected_token = (os.getenv("META_VERIFY_TOKEN") or "").strip()
     if not expected_token:
+        logger.error("Webhook verification failed: META_VERIFY_TOKEN is not configured")
         raise HTTPException(status_code=500, detail="META_VERIFY_TOKEN is not configured")
 
     if mode_value != "subscribe" or verify_token_value != expected_token:
+        logger.warning(
+            "Webhook verification rejected: mode=%r token_len=%s expected_token_len=%s challenge_len=%s",
+            mode_value,
+            len(verify_token_value),
+            len(expected_token),
+            len(challenge_value),
+        )
         raise HTTPException(status_code=403, detail="Webhook verification failed")
 
+    logger.info(
+        "Webhook verification accepted: mode=%r challenge_len=%s",
+        mode_value,
+        len(challenge_value),
+    )
     return PlainTextResponse(challenge_value)
 
 
@@ -101,10 +120,20 @@ async def receive_webhook(request: Request) -> JSONResponse:
 def _validate_signature(request: Request, raw_body: bytes) -> bool | None:
     app_secret = (os.getenv("META_APP_SECRET") or "").strip()
     if not app_secret:
+        logger.warning(
+            "Webhook signature validation skipped: META_APP_SECRET is not configured; body_len=%s",
+            len(raw_body),
+        )
         return None
 
     received = request.headers.get("x-hub-signature-256", "")
     if not received.startswith("sha256="):
+        logger.warning(
+            "Webhook signature missing or malformed: header_present=%s header_prefix=%r body_len=%s",
+            bool(received),
+            received[:12],
+            len(raw_body),
+        )
         return False
 
     expected = hmac.new(
@@ -112,7 +141,39 @@ def _validate_signature(request: Request, raw_body: bytes) -> bool | None:
         msg=raw_body,
         digestmod=hashlib.sha256,
     ).hexdigest()
-    return hmac.compare_digest(received, f"sha256={expected}")
+    expected_full = f"sha256={expected}"
+    matches = hmac.compare_digest(received, expected_full)
+    if not matches:
+        logger.warning(
+            "Webhook signature mismatch: received_prefix=%s expected_prefix=%s body_len=%s ua=%r",
+            _signature_prefix(received),
+            _signature_prefix(expected_full),
+            len(raw_body),
+            request.headers.get("user-agent", ""),
+        )
+    else:
+        logger.info(
+            "Webhook signature accepted: body_len=%s ua=%r",
+            len(raw_body),
+            request.headers.get("user-agent", ""),
+        )
+    return matches
+
+
+def _signature_prefix(value: str) -> str:
+    if not value:
+        return "<empty>"
+    if len(value) <= 20:
+        return value
+    return f"{value[:16]}...{value[-8:]}"
+
+
+def _secret_fingerprint(value: str) -> str:
+    if not value:
+        return "<empty>"
+    if len(value) <= 8:
+        return value
+    return f"{value[:4]}...{value[-4:]}"
 
 
 def _extract_headers(request: Request) -> dict[str, Any]:
