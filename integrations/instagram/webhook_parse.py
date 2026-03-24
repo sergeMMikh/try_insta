@@ -34,10 +34,15 @@ def extract_comment_tasks(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
             seen_ids.add(comment_id)
             from_data = value.get("from")
+            media_data = value.get("media")
             tasks.append(
                 {
                     "comment_id": comment_id,
-                    "media_id": _first_nonempty(value.get("media_id"), value.get("post_id")),
+                    "media_id": _first_nonempty(
+                        value.get("media_id"),
+                        value.get("post_id"),
+                        media_data.get("id") if isinstance(media_data, dict) else None,
+                    ),
                     "parent_id": _first_nonempty(value.get("parent_id")),
                     "commenter_username": _first_nonempty(
                         value.get("username"),

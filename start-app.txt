@@ -1,0 +1,4 @@
+ngrok http 8000
+
+python -m uvicorn webhooks.instagram_webhook:app --host 0.0.0.0 --port 8000
+

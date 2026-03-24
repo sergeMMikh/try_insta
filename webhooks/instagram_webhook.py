@@ -3,14 +3,21 @@ import hmac
 import json
 import logging
 import os
+import threading
 from typing import Any
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
-from db import ensure_tables, enqueue_comment_tasks, insert_ig_event
+from db import (
+    ensure_tables,
+    enqueue_comment_tasks,
+    get_comment_reply_mode,
+    insert_ig_event,
+)
 from integrations.instagram import extract_comment_tasks
+from workers.comments_worker import CommentsWorker
 
 
 logger = logging.getLogger(__name__)
@@ -18,17 +25,25 @@ logger = logging.getLogger(__name__)
 load_dotenv(override=True)
 
 app = FastAPI(title="Instagram Webhook", version="0.1.0")
+_worker_thread: threading.Thread | None = None
 
 
 @app.on_event("startup")
 async def on_startup() -> None:
+    _configure_worker_logging()
     ensure_tables()
+    _maybe_start_comments_worker()
     app_secret = (os.getenv("META_APP_SECRET") or "").strip()
+    env_reply_mode = (os.getenv("IG_REPLY_MODE") or "").strip().lower() or "<unset>"
+    effective_reply_mode = get_comment_reply_mode()
     logger.warning(
-        "Instagram webhook service started; META_VERIFY_TOKEN configured=%s; META_APP_SECRET configured=%s; META_APP_SECRET fingerprint=%s",
+        "Instagram webhook service started; META_VERIFY_TOKEN configured=%s; META_APP_SECRET configured=%s; META_APP_SECRET fingerprint=%s; IG_START_COMMENTS_WORKER=%s; IG_REPLY_MODE env=%s effective=%s",
         bool((os.getenv("META_VERIFY_TOKEN") or "").strip()),
         bool(app_secret),
         _secret_fingerprint(app_secret),
+        _is_truthy_env("IG_START_COMMENTS_WORKER"),
+        env_reply_mode,
+        effective_reply_mode,
     )
 
 
@@ -189,3 +204,42 @@ def _extract_headers(request: Request) -> dict[str, Any]:
         if header_value:
             result[header_name] = header_value
     return result
+
+
+def _maybe_start_comments_worker() -> None:
+    global _worker_thread
+
+    if not _is_truthy_env("IG_START_COMMENTS_WORKER"):
+        return
+    if _worker_thread and _worker_thread.is_alive():
+        return
+
+    _worker_thread = threading.Thread(
+        target=_run_comments_worker_forever,
+        name="ig-comments-worker",
+        daemon=True,
+    )
+    _worker_thread.start()
+    logger.info("Background comments worker thread started")
+
+
+def _run_comments_worker_forever() -> None:
+    try:
+        CommentsWorker().run_forever()
+    except Exception:
+        logger.exception("Background comments worker stopped unexpectedly")
+
+
+def _is_truthy_env(name: str) -> bool:
+    value = (os.getenv(name) or "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def _configure_worker_logging() -> None:
+    worker_logger = logging.getLogger("workers.comments_worker")
+    uvicorn_error_logger = logging.getLogger("uvicorn.error")
+
+    worker_logger.setLevel(logging.INFO)
+    if uvicorn_error_logger.handlers:
+        worker_logger.handlers = list(uvicorn_error_logger.handlers)
+        worker_logger.propagate = False

@@ -12,8 +12,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app_settings import load_app_settings
-from config import read_env_var, read_env_var_optional
 from db import (
     claim_next_comment_task,
     ensure_tables,
@@ -21,8 +19,9 @@ from db import (
     mark_comment_task_done,
     mark_comment_task_error,
 )
-from integrations.ai import build_llm_adapter
-from integrations.instagram import InstagramGraphClient, get_comment, reply_to_comment
+from config import read_env_var, read_env_var_optional
+from integrations.ai import build_llm_adapter_from_env
+from integrations.instagram import InstagramGraphClient, reply_to_comment
 
 
 logger = logging.getLogger(__name__)
@@ -33,11 +32,11 @@ load_dotenv()
 class CommentsWorker:
     def __init__(self) -> None:
         self.graph = InstagramGraphClient.from_env()
-        app_settings = load_app_settings(read_env_var, read_env_var_optional)
-        self.llm = build_llm_adapter(app_settings.llm)
+        self.llm = build_llm_adapter_from_env(read_env_var, read_env_var_optional)
         self.poll_seconds = _read_int_env("IG_WORKER_POLL_SECONDS", 3)
         self.idle_log_every = _read_int_env("IG_WORKER_IDLE_LOG_EVERY", 20)
         self._idle_ticks = 0
+        self._log_reply_mode_configuration()
 
     def run_forever(self) -> None:
         ensure_tables()
@@ -77,8 +76,21 @@ class CommentsWorker:
                 )
                 return
 
-            comment = get_comment(self.graph, comment_id)
-            reply_text = self._build_reply(task, comment)
+            if _is_self_authored_comment(task):
+                logger.info(
+                    "Skipping self-authored comment id=%s username=%s",
+                    comment_id,
+                    task.get("commenter_username"),
+                )
+                mark_comment_task_done(
+                    task_id,
+                    reply_mode_snapshot=mode,
+                    reply_text=None,
+                    reply_comment_id=None,
+                )
+                return
+
+            reply_text = self._build_reply(task)
 
             if mode == "draft":
                 logger.info("Draft reply for comment_id=%s: %s", comment_id, reply_text)
@@ -107,9 +119,9 @@ class CommentsWorker:
             logger.exception("Failed to process comment task id=%s", task_id)
             mark_comment_task_error(task_id, str(exc))
 
-    def _build_reply(self, task: dict[str, Any], comment: dict[str, Any]) -> str:
-        comment_text = str(comment.get("text") or task.get("comment_text") or "").strip()
-        username = str(comment.get("username") or task.get("commenter_username") or "").strip()
+    def _build_reply(self, task: dict[str, Any]) -> str:
+        comment_text = str(task.get("comment_text") or "").strip()
+        username = str(task.get("commenter_username") or "").strip()
 
         if self.llm is None:
             return "Спасибо за комментарий! Мы скоро ответим подробнее."
@@ -123,12 +135,24 @@ class CommentsWorker:
             f"Комментарий: {comment_text or '[пусто]'}"
         )
 
-        user_key = _safe_user_key(comment.get("id") or task.get("comment_id"))
+        user_key = _safe_user_key(task.get("comment_id"))
         reply = self.llm.reply(user_key, prompt).strip()
         reply = " ".join(reply.split())
         if not reply:
             reply = "Спасибо за комментарий!"
         return reply[:1000]
+
+    def _log_reply_mode_configuration(self) -> None:
+        env_mode = (os.getenv("IG_REPLY_MODE") or "").strip().lower() or "<unset>"
+        effective_mode = get_comment_reply_mode()
+        if env_mode != effective_mode:
+            logger.warning(
+                "Comment reply mode differs: env=%s effective=%s (DB setting wins)",
+                env_mode,
+                effective_mode,
+            )
+        else:
+            logger.info("Comment reply mode: %s", effective_mode)
 
 
 def _safe_user_key(raw_value: Any) -> int:
@@ -147,6 +171,24 @@ def _read_int_env(name: str, default: int) -> int:
         return max(1, int(raw_value or str(default)))
     except ValueError:
         return default
+
+
+def _is_self_authored_comment(task: dict[str, Any]) -> bool:
+    payload = task.get("payload_json")
+    if not isinstance(payload, dict):
+        return False
+
+    value = payload.get("value")
+    if not isinstance(value, dict):
+        return False
+
+    from_data = value.get("from")
+    if not isinstance(from_data, dict):
+        return False
+
+    author_id = str(from_data.get("id") or "").strip()
+    entry_id = str(payload.get("entry_id") or "").strip()
+    return bool(author_id and entry_id and author_id == entry_id)
 
 
 def main() -> None:
