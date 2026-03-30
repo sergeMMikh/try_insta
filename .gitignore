@@ -50,6 +50,7 @@ coverage.xml
 .ruff_cache/
 
 # Environments
+.env-30032026
 .env
 .env.*
 .venv/
