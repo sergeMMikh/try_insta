@@ -51,8 +51,8 @@ coverage.xml
 
 # Environments
 .env
-.env-30032026
 .env.*
+!.env.example
 .venv/
 venv/
 env/
