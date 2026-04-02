@@ -21,6 +21,7 @@ from db import (
 )
 from config import read_env_var, read_env_var_optional
 from integrations.ai import build_llm_adapter_from_env
+from integrations.dify.adapter import send_comment_to_dify
 from integrations.instagram import InstagramGraphClient, reply_to_comment
 
 
@@ -89,6 +90,14 @@ class CommentsWorker:
                     reply_comment_id=None,
                 )
                 return
+
+            # Отправка данных о комментарии в Dify для аналитики и дальнейшей обработки
+            send_comment_to_dify(
+                platform="instagram",
+                text=str(task.get("comment_text") or "").strip(),
+                author=str(task.get("commenter_username") or "").strip(),
+                comment_id=comment_id,
+            )
 
             reply_text = self._build_reply(task)
 
