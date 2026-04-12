@@ -1,5 +1,6 @@
 import logging
 import os
+import pprint
 import sys
 import time
 from pathlib import Path
@@ -21,7 +22,11 @@ from db import (
 )
 from config import read_env_var, read_env_var_optional
 from integrations.ai import build_llm_adapter_from_env
-from integrations.dify.adapter import send_comment_to_dify
+from integrations.dify.adapter import (
+    DifyUserFacingError,
+    ask_dify_reply,
+    send_comment_to_dify,
+)
 from integrations.instagram import InstagramGraphClient, reply_to_comment
 
 
@@ -91,7 +96,9 @@ class CommentsWorker:
                 )
                 return
 
-            # Отправка данных о комментарии в Dify для аналитики и дальнейшей обработки
+            logger.info("Incoming comment task payload:")
+            pprint.pprint(task)
+
             send_comment_to_dify(
                 platform="instagram",
                 text=str(task.get("comment_text") or "").strip(),
@@ -131,24 +138,44 @@ class CommentsWorker:
     def _build_reply(self, task: dict[str, Any]) -> str:
         comment_text = str(task.get("comment_text") or "").strip()
         username = str(task.get("commenter_username") or "").strip()
+        comment_id = str(task.get("comment_id") or "").strip()
+
+        try:
+            reply = ask_dify_reply(
+                text=comment_text,
+                author=username,
+                comment_id=comment_id,
+                platform="instagram",
+            )
+        except DifyUserFacingError as exc:
+            logger.warning(
+                "Dify reply generation failed for comment_id=%s: %s",
+                comment_id,
+                exc,
+            )
+        except Exception:
+            logger.exception("Unexpected Dify failure for comment_id=%s", comment_id)
+        else:
+            if reply:
+                return reply
 
         if self.llm is None:
-            return "Спасибо за комментарий! Мы скоро ответим подробнее."
+            return "Thanks for your comment! We will reply with more details soon."
 
         prompt = (
-            "Ты помощник бренда и отвечаешь на комментарии в Instagram.\n"
-            "Напиши короткий, вежливый, полезный ответ на русском языке.\n"
-            "Без выдуманных фактов и токсичности.\n"
-            "Если вопрос неясен, задай один уточняющий вопрос.\n\n"
-            f"Имя пользователя: {username or 'неизвестно'}\n"
-            f"Комментарий: {comment_text or '[пусто]'}"
+            "You are a brand assistant replying to Instagram comments.\n"
+            "Write a short, polite, helpful reply in Russian.\n"
+            "Do not invent facts and avoid toxic language.\n"
+            "If the question is unclear, ask one clarifying question.\n\n"
+            f"Username: {username or 'unknown'}\n"
+            f"Comment: {comment_text or '[empty]'}"
         )
 
         user_key = _safe_user_key(task.get("comment_id"))
         reply = self.llm.reply(user_key, prompt).strip()
         reply = " ".join(reply.split())
         if not reply:
-            reply = "Спасибо за комментарий!"
+            reply = "Thanks for your comment!"
         return reply[:1000]
 
     def _log_reply_mode_configuration(self) -> None:
