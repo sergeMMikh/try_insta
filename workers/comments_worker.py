@@ -1,10 +1,9 @@
 import logging
 import os
-import pprint
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from dotenv import load_dotenv
 
@@ -22,11 +21,7 @@ from db import (
 )
 from config import read_env_var, read_env_var_optional
 from integrations.ai import build_llm_adapter_from_env
-from integrations.dify.adapter import (
-    DifyUserFacingError,
-    ask_dify_reply,
-    send_comment_to_dify,
-)
+from integrations.dify import build_dify_chat_adapter_from_env, send_comment_to_dify
 from integrations.instagram import InstagramGraphClient, reply_to_comment
 
 
@@ -35,14 +30,21 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 
+class ReplyService(Protocol):
+    def reply(self, user_id: int | str, text: str) -> str:
+        ...
+
+
 class CommentsWorker:
     def __init__(self) -> None:
         self.graph = InstagramGraphClient.from_env()
-        self.llm = build_llm_adapter_from_env(read_env_var, read_env_var_optional)
+        self.reply_provider = _read_reply_provider()
+        self.reply_service = self._build_reply_service()
         self.poll_seconds = _read_int_env("IG_WORKER_POLL_SECONDS", 3)
         self.idle_log_every = _read_int_env("IG_WORKER_IDLE_LOG_EVERY", 20)
         self._idle_ticks = 0
         self._log_reply_mode_configuration()
+        self._log_reply_provider_configuration()
 
     def run_forever(self) -> None:
         ensure_tables()
@@ -96,15 +98,13 @@ class CommentsWorker:
                 )
                 return
 
-            logger.info("Incoming comment task payload:")
-            pprint.pprint(task)
-
-            send_comment_to_dify(
-                platform="instagram",
-                text=str(task.get("comment_text") or "").strip(),
-                author=str(task.get("commenter_username") or "").strip(),
-                comment_id=comment_id,
-            )
+            if self.reply_provider != "dify":
+                send_comment_to_dify(
+                    platform="instagram",
+                    text=str(task.get("comment_text") or "").strip(),
+                    author=str(task.get("commenter_username") or "").strip(),
+                    comment_id=comment_id,
+                )
 
             reply_text = self._build_reply(task)
 
@@ -136,33 +136,22 @@ class CommentsWorker:
             mark_comment_task_error(task_id, str(exc))
 
     def _build_reply(self, task: dict[str, Any]) -> str:
+        if self.reply_service is None:
+            return "Спасибо за комментарий! Мы скоро ответим подробнее."
+
+        prompt = self._build_reply_prompt(task)
+        user_key = _safe_user_key(task.get("comment_id"))
+        reply = self.reply_service.reply(user_key, prompt).strip()
+        reply = " ".join(reply.split())
+        if not reply:
+            reply = "Спасибо за комментарий!"
+        return reply[:1000]
+
+    def _build_reply_prompt(self, task: dict[str, Any]) -> str:
         comment_text = str(task.get("comment_text") or "").strip()
         username = str(task.get("commenter_username") or "").strip()
-        comment_id = str(task.get("comment_id") or "").strip()
 
-        try:
-            reply = ask_dify_reply(
-                text=comment_text,
-                author=username,
-                comment_id=comment_id,
-                platform="instagram",
-            )
-        except DifyUserFacingError as exc:
-            logger.warning(
-                "Dify reply generation failed for comment_id=%s: %s",
-                comment_id,
-                exc,
-            )
-        except Exception:
-            logger.exception("Unexpected Dify failure for comment_id=%s", comment_id)
-        else:
-            if reply:
-                return reply
-
-        if self.llm is None:
-            return "Thanks for your comment! We will reply with more details soon."
-
-        prompt = (
+        return (
             "You are a brand assistant replying to Instagram comments.\n"
             "Write a short, polite, helpful reply in Russian.\n"
             "Do not invent facts and avoid toxic language.\n"
@@ -171,12 +160,10 @@ class CommentsWorker:
             f"Comment: {comment_text or '[empty]'}"
         )
 
-        user_key = _safe_user_key(task.get("comment_id"))
-        reply = self.llm.reply(user_key, prompt).strip()
-        reply = " ".join(reply.split())
-        if not reply:
-            reply = "Thanks for your comment!"
-        return reply[:1000]
+    def _build_reply_service(self) -> ReplyService | None:
+        if self.reply_provider == "dify":
+            return build_dify_chat_adapter_from_env(read_env_var, read_env_var_optional)
+        return build_llm_adapter_from_env(read_env_var, read_env_var_optional)
 
     def _log_reply_mode_configuration(self) -> None:
         env_mode = (os.getenv("IG_REPLY_MODE") or "").strip().lower() or "<unset>"
@@ -189,6 +176,14 @@ class CommentsWorker:
             )
         else:
             logger.info("Comment reply mode: %s", effective_mode)
+
+    def _log_reply_provider_configuration(self) -> None:
+        logger.info("Comment reply provider: %s", self.reply_provider)
+        if self.reply_service is None:
+            logger.warning(
+                "Reply provider %s is selected but not configured correctly",
+                self.reply_provider,
+            )
 
 
 def _safe_user_key(raw_value: Any) -> int:
@@ -207,6 +202,14 @@ def _read_int_env(name: str, default: int) -> int:
         return max(1, int(raw_value or str(default)))
     except ValueError:
         return default
+
+
+def _read_reply_provider() -> str:
+    value = (os.getenv("IG_REPLY_PROVIDER") or "chat").strip().lower()
+    if value in {"chat", "dify"}:
+        return value
+    logger.warning("Unknown IG_REPLY_PROVIDER=%r, using chat", value)
+    return "chat"
 
 
 def _is_self_authored_comment(task: dict[str, Any]) -> bool:

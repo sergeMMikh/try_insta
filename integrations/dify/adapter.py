@@ -1,82 +1,139 @@
 import logging
 import os
-from typing import Any
-from pprint import pprint
-from urllib.parse import urlencode
+from typing import Callable
 
 import requests
+
+from integrations.ai.adapter import LLMUserFacingError
+
 
 logger = logging.getLogger(__name__)
 
 
-class DifyUserFacingError(Exception):
-    pass
+EnvReader = Callable[[str], str]
+EnvOptionalReader = Callable[[str, str | None], str | None]
 
 
-def ask_dify_reply(
-    text: str,
-    author: str,
-    comment_id: str,
-    platform: str = "instagram",
-) -> str:
-    api_url = (
-        (os.getenv("DIFY_API_URL") or "").strip()
-        or "https://api.dify.ai/v1/chat-messages"
-    )
-    api_key = (os.getenv("DIFY_API_KEY") or "").strip()
-    timeout_seconds = _read_timeout_seconds()
+class DifyChatAdapter:
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str = "https://api.dify.ai/v1",
+        response_mode: str = "blocking",
+        max_input_chars: int = 1500,
+        max_output_chars: int = 1200,
+        timeout_seconds: int = 30,
+    ) -> None:
+        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
+        self.response_mode = response_mode or "blocking"
+        self.max_input_chars = max(50, max_input_chars)
+        self.max_output_chars = max(50, max_output_chars)
+        self.timeout_seconds = max(5, timeout_seconds)
 
-    if not api_key:
-        raise DifyUserFacingError("DIFY_API_KEY is not configured")
+    def reply(self, user_id: int | str, text: str) -> str:
+        text = (text or "").strip()
+        if not text:
+            return "Пустое сообщение."
 
-    payload = {
-        "inputs": {
-            "text": text,
-            "author": author,
-            "comment_id": comment_id,
-            "platform": platform,
-        },
-        "query": text,
-        "response_mode": "blocking",
-        "user": f"{platform}:{author or comment_id}",
-    }
+        if len(text) > self.max_input_chars:
+            text = text[: self.max_input_chars]
 
+        payload = {
+            "inputs": {},
+            "query": text,
+            "response_mode": self.response_mode,
+            "user": str(user_id),
+        }
+
+        try:
+            response = requests.post(
+                f"{self.base_url}/chat-messages",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=self.timeout_seconds,
+            )
+            response.raise_for_status()
+        except requests.exceptions.HTTPError as exc:
+            status_code = exc.response.status_code if exc.response is not None else None
+            body = exc.response.text if exc.response is not None else ""
+            logger.error("Dify chat HTTP error %s: %s", status_code, body)
+
+            if status_code == 401:
+                raise LLMUserFacingError(
+                    "Ошибка Dify API: неверный ключ или нет доступа к приложению."
+                ) from exc
+            if status_code == 404:
+                raise LLMUserFacingError(
+                    "Dify API не найден. Проверьте DIFY_API_BASE_URL и тип приложения."
+                ) from exc
+            if status_code == 429:
+                raise LLMUserFacingError(
+                    "Dify временно ограничивает запросы. Попробуйте чуть позже."
+                ) from exc
+            if status_code is not None and 500 <= status_code < 600:
+                raise LLMUserFacingError(
+                    "Dify временно недоступен. Попробуйте позже."
+                ) from exc
+            raise
+        except requests.exceptions.Timeout as exc:
+            logger.error("Dify chat timeout: %s", exc)
+            raise LLMUserFacingError(
+                "Dify отвечает слишком долго. Попробуйте еще раз."
+            ) from exc
+        except requests.exceptions.RequestException as exc:
+            logger.error("Dify chat network error: %s", exc)
+            raise LLMUserFacingError(
+                "Нет соединения с Dify API или запрос истек по времени."
+            ) from exc
+
+        try:
+            data = response.json()
+        except ValueError as exc:
+            logger.error("Invalid Dify chat JSON response: %r", response.text)
+            raise RuntimeError("Invalid Dify response format") from exc
+
+        logger.debug("Dify chat response: %s", data)
+        answer = str(data.get("answer") or "").strip()
+        if not answer:
+            logger.error("Unexpected Dify chat response format: %r", data)
+            raise RuntimeError("Unexpected Dify response format")
+
+        if len(answer) > self.max_output_chars:
+            answer = answer[: self.max_output_chars].rstrip() + "..."
+        return answer
+
+
+def build_dify_chat_adapter_from_env(
+    read_env_var: EnvReader,
+    read_env_var_optional: EnvOptionalReader,
+) -> DifyChatAdapter | None:
     try:
-        response = requests.post(
-            api_url,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
-            timeout=timeout_seconds,
-        )
-        response.raise_for_status()
-    except requests.exceptions.Timeout as exc:
-        raise DifyUserFacingError("Dify timed out while generating reply") from exc
-    except requests.exceptions.HTTPError as exc:
-        body = exc.response.text if exc.response is not None else ""
-        status_code = exc.response.status_code if exc.response is not None else "?"
-        logger.error(
-            "Dify chat HTTP error: status=%s body=%s",
-            status_code,
-            body,
-        )
-        raise DifyUserFacingError("Dify chat request failed") from exc
-    except requests.exceptions.RequestException as exc:
-        logger.error("Dify chat network error: %s", exc)
-        raise DifyUserFacingError("Could not reach Dify chat") from exc
+        api_key = read_env_var("DIFY_API_KEY")
+    except (KeyError, ValueError, FileNotFoundError) as exc:
+        logger.warning("DIFY_API_KEY is not configured: %s", exc)
+        return None
 
-    data = response.json()
-    print("Dify response:")
-    pprint(data)
+    base_url = (
+        read_env_var_optional("DIFY_API_BASE_URL", "https://api.dify.ai/v1")
+        or "https://api.dify.ai/v1"
+    )
+    response_mode = read_env_var_optional("DIFY_RESPONSE_MODE", "blocking") or "blocking"
+    timeout_seconds_raw = read_env_var_optional("DIFY_TIMEOUT_SECONDS", "30") or "30"
+    try:
+        timeout_seconds = max(5, int(timeout_seconds_raw))
+    except ValueError:
+        timeout_seconds = 30
 
-    reply = data.get("answer")
-    if not reply:
-        logger.error("Dify chat response did not contain answer: %r", data)
-        raise DifyUserFacingError("Dify chat returned an empty reply")
-
-    return " ".join(reply.split())[:1000]
+    return DifyChatAdapter(
+        api_key=api_key,
+        base_url=base_url,
+        response_mode=response_mode,
+        timeout_seconds=timeout_seconds,
+    )
 
 
 def send_comment_to_dify(
@@ -85,18 +142,6 @@ def send_comment_to_dify(
     author: str,
     comment_id: str,
 ) -> bool:
-    """
-    Send comment data to Dify webhook for processing.
-
-    Args:
-        platform: Platform name (e.g., "instagram")
-        text: Comment text content
-        author: Comment author/username
-        comment_id: Unique comment identifier
-
-    Returns:
-        True if successful, False otherwise
-    """
     webhook_url = (os.getenv("DIFY_WEBHOOK_URL") or "").strip()
 
     if not webhook_url:
@@ -126,33 +171,11 @@ def send_comment_to_dify(
         )
         logger.debug("Dify webhook response: %s", response.text)
         return True
-    except requests.exceptions.RequestException as e:
+    except requests.exceptions.RequestException as exc:
         logger.error(
             "Failed to send comment to Dify webhook: %s url=%s payload=%s",
-            e,
+            exc,
             webhook_url,
             payload,
         )
         return False
-
-
-def extract_reply(data):
-    outputs = data.get("data", {}).get("outputs", {})
-
-    # приоритет
-    if "text" in outputs:
-        return outputs["text"]
-
-    if "LLM_text" in outputs:
-        return outputs["LLM_text"]
-
-    # fallback
-    return None
-
-
-def _read_timeout_seconds() -> int:
-    raw_value = (os.getenv("DIFY_TIMEOUT_SECONDS") or "").strip() or "30"
-    try:
-        return max(5, int(raw_value))
-    except ValueError:
-        return 30

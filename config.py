@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 
@@ -16,6 +17,13 @@ def read_token(path: str | Path) -> str:
 
 
 def read_env_var(name: str, env_path: str | Path = ".env") -> str:
+    env_value = os.getenv(name)
+    if env_value is not None:
+        env_value = env_value.strip().strip("'\"")
+        if not env_value:
+            raise ValueError(f"{name} is empty in environment")
+        return env_value
+
     path = Path(env_path)
 
     if not path.exists():

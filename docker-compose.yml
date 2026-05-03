@@ -1,0 +1,64 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-insta-bot}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vrag}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  webhook:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-vrag}@postgres:5432/${POSTGRES_DB:-insta-bot}
+      DABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-vrag}@postgres:5432/${POSTGRES_DB:-insta-bot}
+      IG_START_COMMENTS_WORKER: "0"
+    command:
+      - python
+      - -m
+      - uvicorn
+      - webhooks.instagram_webhook:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    ports:
+      - ${WEBHOOK_PORT:-8000}:8000
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-vrag}@postgres:5432/${POSTGRES_DB:-insta-bot}
+      DABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-vrag}@postgres:5432/${POSTGRES_DB:-insta-bot}
+    command:
+      - python
+      - workers/comments_worker.py
+
+volumes:
+  postgres_data:
