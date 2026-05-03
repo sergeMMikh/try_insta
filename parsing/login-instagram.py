@@ -204,7 +204,7 @@ def _keyboard_activate_facebook_cta(driver: WebDriver, max_tabs: int = 25) -> bo
 def _log_facebook_cta_diagnostics(driver: WebDriver) -> None:
     """Print minimal diagnostics to understand why CTA click does not redirect."""
     try:
-        info = driver.execute_script(
+        driver.execute_script(
             """
             const isCtaText = (txt) => /facebook/i.test(txt) && /(log\\s*in|continue|войти)/i.test(txt);
             const result = {
@@ -287,7 +287,8 @@ def _extract_facebook_oauth_href(driver: WebDriver) -> Optional[str]:
           /^javascript:/i.test(href) ||
           /developers\\.facebook\\.com/i.test(href) ||
           /facebook\\.com\\/help\\//i.test(href);
-        const ctaText = (a) => ((a.innerText || a.textContent || '') + ' ' + (a.getAttribute('aria-label') || '')).trim();
+        const ctaText = (a) =>
+          ((a.innerText || a.textContent || '') + ' ' + (a.getAttribute('aria-label') || '')).trim();
         const isLoginCtaText = (text) => /facebook/i.test(text) && /(log\\s*in|continue|войти)/i.test(text);
         const links = [...document.querySelectorAll('a[href]')];
 
@@ -497,8 +498,6 @@ def _click_facebook_authorize_continue(driver: WebDriver, timeout: int = 5) -> b
 
 
 def _login_facebook_form(driver: WebDriver, username: str, password: str, timeout: int) -> None:
-    wait = WebDriverWait(driver, timeout)
-
     # OAuth can open a consent screen ("Continue as ...") instead of login fields.
     if _click_facebook_authorize_continue(driver, timeout=4):
         return
@@ -541,24 +540,6 @@ def _login_facebook_form(driver: WebDriver, username: str, password: str, timeou
         timeout,
     )
 
-    email_len = int(
-        driver.execute_script(
-            """
-            const els=[...document.querySelectorAll("input[name='email']")];
-            const el=els.find(e => e.offsetParent !== null) || els[0];
-            return el ? (el.value || '').length : -1;
-            """
-        )
-    )
-    pass_len = int(
-        driver.execute_script(
-            """
-            const els=[...document.querySelectorAll("input[name='pass']")];
-            const el=els.find(e => e.offsetParent !== null) || els[0];
-            return el ? (el.value || '').length : -1;
-            """
-        )
-    )
     submit_selectors = [
         (By.CSS_SELECTOR, "button[name='login']"),
         (By.CSS_SELECTOR, "input[name='login']"),

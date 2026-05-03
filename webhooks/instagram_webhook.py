@@ -39,6 +39,15 @@ _worker_thread: threading.Thread | None = None
 
 @app.on_event("startup")
 async def on_startup() -> None:
+    """
+    Подготавливает webhook-приложение к приёму событий Instagram.
+
+    Args:
+        None: Функция не принимает аргументов.
+
+    Returns:
+        None: Ничего не возвращает.
+    """
     _configure_worker_logging()
     ensure_tables()
     _maybe_start_comments_worker()
@@ -46,7 +55,9 @@ async def on_startup() -> None:
     env_reply_mode = (os.getenv("IG_REPLY_MODE") or "").strip().lower() or "<unset>"
     effective_reply_mode = get_comment_reply_mode()
     logger.warning(
-        "Instagram webhook service started; META_VERIFY_TOKEN configured=%s; META_APP_SECRET configured=%s; META_APP_SECRET fingerprint=%s; IG_START_COMMENTS_WORKER=%s; IG_REPLY_MODE env=%s effective=%s",
+        "Instagram webhook service started; META_VERIFY_TOKEN configured=%s; "
+        "META_APP_SECRET configured=%s; META_APP_SECRET fingerprint=%s; "
+        "IG_START_COMMENTS_WORKER=%s; IG_REPLY_MODE env=%s effective=%s",
         bool((os.getenv("META_VERIFY_TOKEN") or "").strip()),
         bool(app_secret),
         _secret_fingerprint(app_secret),
@@ -67,6 +78,24 @@ async def verify_webhook(
     hub_verify_token_alt: str = Query("", alias="hub_verify_token"),
     hub_challenge_alt: str = Query("", alias="hub_challenge"),
 ) -> PlainTextResponse:
+    """
+    Обрабатывает verification challenge от Meta для Instagram webhook.
+
+    Args:
+        request (Request): Входящий HTTP-запрос.
+        hub_mode (str, optional): Стандартный параметр `hub.mode`.
+        hub_verify_token (str, optional): Стандартный параметр `hub.verify_token`.
+        hub_challenge (str, optional): Стандартный параметр `hub.challenge`.
+        hub_mode_alt (str, optional): Альтернативное имя параметра `hub_mode`.
+        hub_verify_token_alt (str, optional): Альтернативное имя параметра `hub_verify_token`.
+        hub_challenge_alt (str, optional): Альтернативное имя параметра `hub_challenge`.
+
+    Returns:
+        PlainTextResponse: Ответ с challenge-строкой для подтверждения webhook.
+
+    Raises:
+        HTTPException: Если verify token не настроен или challenge не проходит проверку.
+    """
     # Meta usually sends dotted params (hub.mode), but occasionally integrations
     # pass underscore aliases. Accept both to avoid flaky verification failures.
     del request
@@ -134,6 +163,18 @@ async def verify_webhook(
 @app.post("/")
 @app.post("/webhook")
 async def receive_webhook(request: Request) -> JSONResponse:
+    """
+    Принимает Instagram webhook, сохраняет событие и ставит задачи в очередь.
+
+    Args:
+        request (Request): Входящий HTTP-запрос с JSON payload.
+
+    Returns:
+        JSONResponse: JSON с идентификатором события и количеством созданных задач.
+
+    Raises:
+        HTTPException: Если тело пустое, подпись неверна или payload имеет неверный формат.
+    """
     raw_body = await request.body()
     if not raw_body:
         raise HTTPException(status_code=400, detail="Empty webhook body")
@@ -224,6 +265,16 @@ async def receive_webhook(request: Request) -> JSONResponse:
 
 
 def _validate_signature(request: Request, raw_body: bytes) -> bool | None:
+    """
+    Проверяет HMAC-подпись входящего webhook-запроса от Meta.
+
+    Args:
+        request (Request): Входящий HTTP-запрос.
+        raw_body (bytes): Исходное тело запроса.
+
+    Returns:
+        bool | None: `True` при валидной подписи, `False` при mismatch и `None`, если проверка отключена.
+    """
     app_secret = (os.getenv("META_APP_SECRET") or "").strip()
     if not app_secret:
         logger.warning(
@@ -267,6 +318,15 @@ def _validate_signature(request: Request, raw_body: bytes) -> bool | None:
 
 
 def _signature_prefix(value: str) -> str:
+    """
+    Возвращает сокращённый префикс подписи для безопасного логирования.
+
+    Args:
+        value (str): Полное значение подписи.
+
+    Returns:
+        str: Короткое представление подписи для логов.
+    """
     if not value:
         return "<empty>"
     if len(value) <= 20:
@@ -275,6 +335,15 @@ def _signature_prefix(value: str) -> str:
 
 
 def _secret_fingerprint(value: str) -> str:
+    """
+    Строит безопасный отпечаток секрета для логирования конфигурации.
+
+    Args:
+        value (str): Исходное секретное значение.
+
+    Returns:
+        str: Короткий fingerprint секрета.
+    """
     if not value:
         return "<empty>"
     if len(value) <= 8:
@@ -283,6 +352,15 @@ def _secret_fingerprint(value: str) -> str:
 
 
 def _extract_headers(request: Request) -> dict[str, Any]:
+    """
+    Извлекает из запроса ограниченный набор заголовков для сохранения и трассировки.
+
+    Args:
+        request (Request): Входящий HTTP-запрос.
+
+    Returns:
+        dict[str, Any]: Словарь с выбранными заголовками.
+    """
     result: dict[str, Any] = {}
     for header_name in (
         "user-agent",
@@ -298,6 +376,15 @@ def _extract_headers(request: Request) -> dict[str, Any]:
 
 
 def _maybe_start_comments_worker() -> None:
+    """
+    Запускает локальный поток worker-а, если это разрешено конфигурацией.
+
+    Args:
+        None: Функция не принимает аргументов.
+
+    Returns:
+        None: Ничего не возвращает.
+    """
     global _worker_thread
 
     if not _is_truthy_env("IG_START_COMMENTS_WORKER"):
@@ -315,6 +402,15 @@ def _maybe_start_comments_worker() -> None:
 
 
 def _run_comments_worker_forever() -> None:
+    """
+    Оборачивает запуск `CommentsWorker` в отдельном фоне с логированием ошибок.
+
+    Args:
+        None: Функция не принимает аргументов.
+
+    Returns:
+        None: Ничего не возвращает.
+    """
     try:
         CommentsWorker().run_forever()
     except Exception:
@@ -322,11 +418,29 @@ def _run_comments_worker_forever() -> None:
 
 
 def _is_truthy_env(name: str) -> bool:
+    """
+    Интерпретирует строковую переменную окружения как булев флаг.
+
+    Args:
+        name (str): Имя переменной окружения.
+
+    Returns:
+        bool: `True`, если значение похоже на включённый флаг.
+    """
     value = (os.getenv(name) or "").strip().lower()
     return value in {"1", "true", "yes", "on"}
 
 
 def _configure_worker_logging() -> None:
+    """
+    Подключает логгер воркера к конфигурации логирования Uvicorn.
+
+    Args:
+        None: Функция не принимает аргументов.
+
+    Returns:
+        None: Ничего не возвращает.
+    """
     worker_logger = logging.getLogger("workers.comments_worker")
     uvicorn_error_logger = logging.getLogger("uvicorn.error")
 

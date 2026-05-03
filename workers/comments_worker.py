@@ -13,18 +13,18 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from db import (
+from db import (  # noqa: E402
     claim_next_comment_task,
     ensure_tables,
     get_comment_reply_mode,
     mark_comment_task_done,
     mark_comment_task_error,
 )
-from config import read_env_var, read_env_var_optional
-from integrations.ai import build_llm_adapter_from_env
-from integrations.dify import build_dify_chat_adapter_from_env, send_comment_to_dify
-from integrations.instagram import InstagramGraphClient, reply_to_comment
-from integrations.langfuse_support import (
+from config import read_env_var, read_env_var_optional  # noqa: E402
+from integrations.ai import build_llm_adapter_from_env  # noqa: E402
+from integrations.dify import build_dify_chat_adapter_from_env, send_comment_to_dify  # noqa: E402
+from integrations.instagram import InstagramGraphClient, reply_to_comment  # noqa: E402
+from integrations.langfuse_support import (  # noqa: E402
     build_trace_context,
     get_langfuse_client,
     get_trace_url,
@@ -41,11 +41,30 @@ load_dotenv()
 
 class ReplyService(Protocol):
     def reply(self, user_id: int | str, text: str) -> str:
+        """
+        Возвращает текстовый ответ на входной запрос.
+
+        Args:
+            user_id (int | str): Идентификатор пользователя или комментария.
+            text (str): Текст запроса для генерации ответа.
+
+        Returns:
+            str: Готовый текст ответа.
+        """
         ...
 
 
 class CommentsWorker:
     def __init__(self) -> None:
+        """
+        Инициализирует воркер обработки Instagram-комментариев.
+
+        Args:
+            None: Конструктор не принимает аргументов.
+
+        Returns:
+            None: Ничего не возвращает.
+        """
         self.graph = InstagramGraphClient.from_env()
         self.reply_provider = _read_reply_provider()
         self.reply_service = self._build_reply_service()
@@ -56,6 +75,15 @@ class CommentsWorker:
         self._log_reply_provider_configuration()
 
     def run_forever(self) -> None:
+        """
+        Запускает бесконечный цикл чтения и обработки задач из БД.
+
+        Args:
+            None: Метод не принимает аргументов.
+
+        Returns:
+            None: Ничего не возвращает.
+        """
         ensure_tables()
         logger.info("Comments worker started (poll=%ss)", self.poll_seconds)
         while True:
@@ -72,6 +100,15 @@ class CommentsWorker:
             self._process_task(task)
 
     def _process_task(self, task: dict[str, Any]) -> None:
+        """
+        Обрабатывает одну задачу комментария до финального статуса.
+
+        Args:
+            task (dict[str, Any]): Словарь с данными задачи из очереди.
+
+        Returns:
+            None: Ничего не возвращает.
+        """
         task_id = int(task["id"])
         comment_id = str(task["comment_id"])
         mode = get_comment_reply_mode()
@@ -222,6 +259,15 @@ class CommentsWorker:
                     )
 
     def _build_reply(self, task: dict[str, Any]) -> str:
+        """
+        Генерирует текст ответа через выбранный reply provider.
+
+        Args:
+            task (dict[str, Any]): Словарь с данными комментария.
+
+        Returns:
+            str: Нормализованный текст ответа.
+        """
         if self.reply_service is None:
             return "Спасибо за комментарий! Мы скоро ответим подробнее."
 
@@ -268,6 +314,15 @@ class CommentsWorker:
             return reply
 
     def _build_reply_prompt(self, task: dict[str, Any]) -> str:
+        """
+        Собирает prompt для генерации ответа на комментарий.
+
+        Args:
+            task (dict[str, Any]): Словарь с данными комментария.
+
+        Returns:
+            str: Итоговый prompt для Dify или LLM.
+        """
         comment_text = str(task.get("comment_text") or "").strip()
         username = str(task.get("commenter_username") or "").strip()
 
@@ -281,11 +336,30 @@ class CommentsWorker:
         )
 
     def _build_reply_service(self) -> ReplyService | None:
+        """
+        Создаёт сервис ответов в зависимости от активного провайдера.
+
+        Args:
+            None: Метод не принимает аргументов.
+
+        Returns:
+            ReplyService | None: Настроенный адаптер ответов или `None`.
+        """
         if self.reply_provider == "dify":
             return build_dify_chat_adapter_from_env(read_env_var, read_env_var_optional)
         return build_llm_adapter_from_env(read_env_var, read_env_var_optional)
 
     def _send_reply(self, comment_id: str, reply_text: str) -> dict[str, Any]:
+        """
+        Отправляет сгенерированный ответ в Instagram Graph API.
+
+        Args:
+            comment_id (str): Идентификатор исходного комментария.
+            reply_text (str): Текст ответа.
+
+        Returns:
+            dict[str, Any]: Ответ Graph API после публикации reply-комментария.
+        """
         langfuse = get_langfuse_client()
         observation_cm = (
             langfuse.start_as_current_observation(
@@ -320,6 +394,15 @@ class CommentsWorker:
             return sent
 
     def _log_reply_mode_configuration(self) -> None:
+        """
+        Логирует эффективный режим ответа и расхождения с переменными окружения.
+
+        Args:
+            None: Метод не принимает аргументов.
+
+        Returns:
+            None: Ничего не возвращает.
+        """
         env_mode = (os.getenv("IG_REPLY_MODE") or "").strip().lower() or "<unset>"
         effective_mode = get_comment_reply_mode()
         if env_mode != effective_mode:
@@ -332,6 +415,15 @@ class CommentsWorker:
             logger.info("Comment reply mode: %s", effective_mode)
 
     def _log_reply_provider_configuration(self) -> None:
+        """
+        Логирует выбранного провайдера ответов и ошибки его конфигурации.
+
+        Args:
+            None: Метод не принимает аргументов.
+
+        Returns:
+            None: Ничего не возвращает.
+        """
         logger.info("Comment reply provider: %s", self.reply_provider)
         if self.reply_service is None:
             logger.warning(
@@ -341,6 +433,15 @@ class CommentsWorker:
 
 
 def _safe_user_key(raw_value: Any) -> int:
+    """
+    Преобразует произвольный идентификатор в стабильный числовой ключ.
+
+    Args:
+        raw_value (Any): Исходное значение идентификатора.
+
+    Returns:
+        int: Числовой ключ для адаптера ответов.
+    """
     raw_text = str(raw_value or "").strip()
     if raw_text.isdigit():
         try:
@@ -351,6 +452,16 @@ def _safe_user_key(raw_value: Any) -> int:
 
 
 def _read_int_env(name: str, default: int) -> int:
+    """
+    Читает целочисленную переменную окружения с защитой от некорректных значений.
+
+    Args:
+        name (str): Имя переменной окружения.
+        default (int): Значение по умолчанию.
+
+    Returns:
+        int: Нормализованное целочисленное значение не меньше `1`.
+    """
     raw_value = os.getenv(name, str(default))
     try:
         return max(1, int(raw_value or str(default)))
@@ -359,6 +470,15 @@ def _read_int_env(name: str, default: int) -> int:
 
 
 def _read_reply_provider() -> str:
+    """
+    Возвращает допустимого провайдера ответов для комментариев.
+
+    Args:
+        None: Функция не принимает аргументов.
+
+    Returns:
+        str: Значение `chat` или `dify`.
+    """
     value = (os.getenv("IG_REPLY_PROVIDER") or "chat").strip().lower()
     if value in {"chat", "dify"}:
         return value
@@ -367,6 +487,15 @@ def _read_reply_provider() -> str:
 
 
 def _build_task_trace_seed(task: dict[str, Any]) -> str:
+    """
+    Строит seed для трассировки задачи в Langfuse.
+
+    Args:
+        task (dict[str, Any]): Словарь с данными задачи.
+
+    Returns:
+        str: Seed в формате `instagram-event:*` или `instagram-comment:*`.
+    """
     source_event_id = str(task.get("source_event_id") or "").strip()
     if source_event_id:
         return f"instagram-event:{source_event_id}"
@@ -379,6 +508,15 @@ def _build_task_trace_seed(task: dict[str, Any]) -> str:
 
 
 def _langfuse_user_id(task: dict[str, Any]) -> str | None:
+    """
+    Вычисляет пользовательский идентификатор для тегирования trace.
+
+    Args:
+        task (dict[str, Any]): Словарь с данными задачи.
+
+    Returns:
+        str | None: Username комментатора или fallback на `comment_id`.
+    """
     username = str(task.get("commenter_username") or "").strip()
     if username:
         return username
@@ -387,6 +525,15 @@ def _langfuse_user_id(task: dict[str, Any]) -> str | None:
 
 
 def _is_self_authored_comment(task: dict[str, Any]) -> bool:
+    """
+    Проверяет, оставлен ли комментарий самим владельцем аккаунта.
+
+    Args:
+        task (dict[str, Any]): Словарь с данными задачи.
+
+    Returns:
+        bool: `True`, если комментарий authored тем же аккаунтом, что и media entry.
+    """
     payload = task.get("payload_json")
     if not isinstance(payload, dict):
         return False
@@ -405,6 +552,15 @@ def _is_self_authored_comment(task: dict[str, Any]) -> bool:
 
 
 def main() -> None:
+    """
+    Запускает воркер как самостоятельный процесс.
+
+    Args:
+        None: Функция не принимает аргументов.
+
+    Returns:
+        None: Ничего не возвращает.
+    """
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",

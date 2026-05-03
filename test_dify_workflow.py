@@ -4,7 +4,6 @@
 Запускает ask_dify_reply с тестовыми данными.
 """
 
-import os
 import sys
 from pathlib import Path
 
@@ -13,11 +12,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from dotenv import load_dotenv
-from integrations.dify.adapter import ask_dify_reply
+from dotenv import load_dotenv  # noqa: E402
+from integrations.dify.adapter import ask_dify_reply  # noqa: E402
 
 # Загружаем переменные окружения
 load_dotenv()
+
 
 def test_dify_workflow():
     """Тестируем Dify workflow.run с тестовыми данными."""
@@ -49,7 +49,9 @@ def test_dify_workflow():
     except Exception as e:
         print(f"❌ Ошибка при вызове Dify: {e}")
         import traceback
+
         traceback.print_exc()
+
 
 if __name__ == "__main__":
     test_dify_workflow()

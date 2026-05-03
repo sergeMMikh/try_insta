@@ -13,6 +13,15 @@ EnvOptionalReader = Callable[[str, str | None], str | None]
 
 
 def build_llm_adapter(config: LLMConfig) -> LLMAdapter | None:
+    """
+    Создаёт LLM-адаптер из уже подготовленного объекта конфигурации.
+
+    Args:
+        config (LLMConfig): Настройки доступа к модели и ограничения диалога.
+
+    Returns:
+        LLMAdapter | None: Готовый адаптер или `None`, если API-ключ отсутствует.
+    """
     if not config.api_key:
         return None
 
@@ -34,6 +43,16 @@ def build_llm_adapter_from_env(
     read_env_var: EnvReader,
     read_env_var_optional: EnvOptionalReader,
 ) -> LLMAdapter | None:
+    """
+    Собирает LLM-адаптер напрямую из переменных окружения.
+
+    Args:
+        read_env_var (EnvReader): Функция чтения обязательной переменной окружения.
+        read_env_var_optional (EnvOptionalReader): Функция чтения необязательной переменной окружения.
+
+    Returns:
+        LLMAdapter | None: Готовый адаптер или `None`, если конфигурация неполная.
+    """
     try:
         api_key = read_env_var("OPENAI_API_KEY")
     except (KeyError, ValueError, FileNotFoundError) as exc:

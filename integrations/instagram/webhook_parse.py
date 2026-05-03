@@ -2,6 +2,15 @@ from typing import Any
 
 
 def extract_comment_tasks(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """
+    Извлекает из Instagram webhook payload задачи на обработку комментариев.
+
+    Args:
+        payload (dict[str, Any]): JSON-представление webhook-события.
+
+    Returns:
+        list[dict[str, Any]]: Список уникальных задач по новым комментариям.
+    """
     tasks: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
 
@@ -62,6 +71,16 @@ def extract_comment_tasks(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _looks_like_comment_event(field: str | None, value: dict[str, Any]) -> bool:
+    """
+    Определяет, похоже ли изменение webhook на событие комментария.
+
+    Args:
+        field (str | None): Значение поля `field` из блока `change`.
+        value (dict[str, Any]): Поле `value` из webhook payload.
+
+    Returns:
+        bool: `True`, если изменение соответствует комментарию.
+    """
     field_value = (field or "").strip().lower()
     item_value = _as_str(value.get("item"))
     if field_value == "comments":
@@ -76,11 +95,29 @@ def _looks_like_comment_event(field: str | None, value: dict[str, Any]) -> bool:
 
 
 def _is_delete_event(value: dict[str, Any]) -> bool:
+    """
+    Проверяет, не описывает ли payload удаление комментария.
+
+    Args:
+        value (dict[str, Any]): Поле `value` из webhook payload.
+
+    Returns:
+        bool: `True`, если событие относится к удалению.
+    """
     verb = _as_str(value.get("verb"))
     return bool(verb and verb.lower() in {"remove", "delete", "deleted"})
 
 
 def _extract_comment_id(value: dict[str, Any]) -> str | None:
+    """
+    Извлекает числовой идентификатор комментария из payload.
+
+    Args:
+        value (dict[str, Any]): Поле `value` из webhook payload.
+
+    Returns:
+        str | None: Идентификатор комментария или `None`, если он не найден.
+    """
     for candidate in (value.get("comment_id"), value.get("id")):
         comment_id = _as_str(candidate)
         if comment_id and comment_id.isdigit():
@@ -89,6 +126,15 @@ def _extract_comment_id(value: dict[str, Any]) -> str | None:
 
 
 def _first_nonempty(*values: Any) -> str | None:
+    """
+    Возвращает первое непустое строковое значение из набора кандидатов.
+
+    Args:
+        *values (Any): Значения-кандидаты.
+
+    Returns:
+        str | None: Первая непустая строка или `None`.
+    """
     for value in values:
         text_value = _as_str(value)
         if text_value:
@@ -97,6 +143,15 @@ def _first_nonempty(*values: Any) -> str | None:
 
 
 def _as_str(value: Any) -> str | None:
+    """
+    Приводит значение к непустой строке с обрезкой пробелов.
+
+    Args:
+        value (Any): Исходное значение.
+
+    Returns:
+        str | None: Очищенная строка или `None`, если значение пустое.
+    """
     if value is None:
         return None
     text_value = str(value).strip()

@@ -1,10 +1,4 @@
 #!/usr/bin/env python3
-"""Тестовый модуль для отправки данных в Dify.
-
-Запускайте вручную:
-  python test-api.py --mode workflow --text "Кто такие ёжики?" --author yarush72 --comment_id 12345
-  python test-api.py --mode webhook --text "Кто такие ёжики?" --author yarush72 --comment_id 12345
-"""
 
 import argparse
 import json

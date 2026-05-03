@@ -39,6 +39,24 @@ class LLMAdapter:
         max_output_chars: int = 1200,
         timeout_seconds: int = 30,
     ) -> None:
+        """
+        Инициализирует адаптер для диалога с OpenAI-совместимым chat API.
+
+        Args:
+            api_key (str): API-ключ провайдера.
+            model (str, optional): Имя модели для генерации ответа.
+            base_url (str, optional): Базовый URL OpenAI-совместимого API.
+            system_prompt (str | None, optional): Системный prompt для всех запросов.
+            memory_size (int, optional): Размер истории сообщений на пользователя.
+            rate_limit_max_requests (int, optional): Максимум запросов на пользователя в окне rate limit.
+            rate_limit_window_seconds (int, optional): Длина окна rate limit в секундах.
+            max_input_chars (int, optional): Максимальная длина входного текста.
+            max_output_chars (int, optional): Максимальная длина итогового ответа.
+            timeout_seconds (int, optional): Таймаут одного HTTP-запроса к модели.
+
+        Returns:
+            None: Ничего не возвращает.
+        """
         self.api_key = api_key
         self.model = model
         self.base_url = base_url.rstrip("/")
@@ -61,6 +79,16 @@ class LLMAdapter:
         self._requests: dict[int, Deque[float]] = defaultdict(deque)
 
     def reply(self, user_id: int, text: str) -> str:
+        """
+        Формирует ответ модели для конкретного пользователя с учётом истории и лимитов.
+
+        Args:
+            user_id (int): Идентификатор пользователя.
+            text (str): Текст входящего сообщения.
+
+        Returns:
+            str: Готовый текст ответа или пользовательское сообщение об ошибке.
+        """
         user_id = int(user_id)
         text = (text or "").strip()
         if not text:
@@ -97,6 +125,15 @@ class LLMAdapter:
         return answer
 
     def _reserve_request_and_get_history(self, user_id: int) -> list[dict[str, str]] | None:
+        """
+        Резервирует слот rate limit и возвращает текущую историю переписки.
+
+        Args:
+            user_id (int): Идентификатор пользователя.
+
+        Returns:
+            list[dict[str, str]] | None: Снимок истории сообщений или `None`, если лимит превышен.
+        """
         now = time.time()
         with self._lock:
             timestamps = self._requests[user_id]
@@ -112,12 +149,38 @@ class LLMAdapter:
         return [{"role": msg.role, "content": msg.content} for msg in history]
 
     def _append_history(self, user_id: int, role: str, content: str) -> None:
+        """
+        Добавляет сообщение в пользовательскую историю диалога.
+
+        Args:
+            user_id (int): Идентификатор пользователя.
+            role (str): Роль сообщения в чате.
+            content (str): Текст сообщения.
+
+        Returns:
+            None: Ничего не возвращает.
+        """
         if self.memory_size == 0:
             return
         with self._lock:
             self._history[user_id].append(_UserMessage(role=role, content=content))
 
     def _call_model(self, history: list[dict[str, str]], user_text: str) -> str:
+        """
+        Выполняет HTTP-вызов chat completions API и извлекает текст ответа.
+
+        Args:
+            history (list[dict[str, str]]): История сообщений пользователя.
+            user_text (str): Текст текущего запроса.
+
+        Returns:
+            str: Текст ответа модели.
+
+        Raises:
+            LLMUserFacingError: Если ошибка модели должна быть показана пользователю в мягкой форме.
+            RuntimeError: Если API вернул неожиданный формат ответа.
+            HTTPError: Если удалённый API вернул необработанную HTTP-ошибку.
+        """
         messages = [{"role": "system", "content": self.system_prompt}]
         messages.extend(history)
         messages.append({"role": "user", "content": user_text})
@@ -252,6 +315,15 @@ class LLMAdapter:
 
 
 def _extract_usage_details(raw_usage: object) -> dict[str, int] | None:
+    """
+    Нормализует статистику использования токенов из ответа модели.
+
+    Args:
+        raw_usage (object): Блок `usage` из ответа API.
+
+    Returns:
+        dict[str, int] | None: Словарь с ключами `input`, `output`, `total` или `None`.
+    """
     if not isinstance(raw_usage, dict):
         return None
 

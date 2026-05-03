@@ -3,6 +3,19 @@ from pathlib import Path
 
 
 def read_token(path: str | Path) -> str:
+    """
+    Читает токен из текстового файла.
+
+    Args:
+        path (str | Path): Путь к файлу с токеном.
+
+    Returns:
+        str: Непустое значение токена.
+
+    Raises:
+        FileNotFoundError: Если файл с токеном не существует.
+        ValueError: Если файл найден, но токен внутри пустой.
+    """
     path = Path(path)
 
     if not path.exists():
@@ -17,6 +30,21 @@ def read_token(path: str | Path) -> str:
 
 
 def read_env_var(name: str, env_path: str | Path = ".env") -> str:
+    """
+    Читает обязательную переменную окружения из `os.environ` или `.env`.
+
+    Args:
+        name (str): Имя искомой переменной.
+        env_path (str | Path, optional): Путь к файлу `.env`, если переменная не найдена в окружении.
+
+    Returns:
+        str: Непустое строковое значение переменной.
+
+    Raises:
+        FileNotFoundError: Если переменная не найдена в окружении и файл `.env` отсутствует.
+        KeyError: Если переменная отсутствует и в окружении, и в файле `.env`.
+        ValueError: Если переменная найдена, но содержит пустое значение.
+    """
     env_value = os.getenv(name)
     if env_value is not None:
         env_value = env_value.strip().strip("'\"")
@@ -49,6 +77,17 @@ def read_env_var(name: str, env_path: str | Path = ".env") -> str:
 def read_env_var_optional(
     name: str, default: str | None = None, env_path: str | Path = ".env"
 ) -> str | None:
+    """
+    Читает необязательную переменную окружения с безопасным fallback.
+
+    Args:
+        name (str): Имя переменной.
+        default (str | None, optional): Значение, которое будет возвращено при отсутствии переменной.
+        env_path (str | Path, optional): Путь к файлу `.env`.
+
+    Returns:
+        str | None: Найденное значение переменной или `default`.
+    """
     try:
         return read_env_var(name, env_path=env_path)
     except (KeyError, FileNotFoundError):

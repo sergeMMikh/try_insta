@@ -15,6 +15,15 @@ load_dotenv()
 
 
 def ensure_tables() -> None:
+    """
+    Создаёт рабочие таблицы и базовые настройки, если они ещё отсутствуют.
+
+    Args:
+        None: Функция не принимает аргументов.
+
+    Returns:
+        None: Ничего не возвращает.
+    """
     engine = get_engine()
     with engine.begin() as conn:
         conn.execute(
@@ -93,6 +102,17 @@ def insert_ig_event(
     headers: dict[str, Any] | None = None,
     signature_valid: bool | None = None,
 ) -> int:
+    """
+    Сохраняет входящее Instagram webhook-событие в таблицу `ig_event`.
+
+    Args:
+        payload (dict[str, Any]): JSON-представление webhook-события.
+        headers (dict[str, Any] | None, optional): Выбранные HTTP-заголовки запроса.
+        signature_valid (bool | None, optional): Результат проверки подписи webhook.
+
+    Returns:
+        int: Идентификатор сохранённой записи события.
+    """
     engine = get_engine()
     entry = payload.get("entry")
     entry_count = len(entry) if isinstance(entry, list) else 0
@@ -131,6 +151,16 @@ def enqueue_comment_tasks(
     tasks: Iterable[dict[str, Any]],
     source_event_id: int | None,
 ) -> int:
+    """
+    Добавляет новые задачи на обработку комментариев в очередь БД.
+
+    Args:
+        tasks (Iterable[dict[str, Any]]): Набор задач, извлечённых из webhook payload.
+        source_event_id (int | None): Идентификатор исходного события webhook.
+
+    Returns:
+        int: Количество реально вставленных задач.
+    """
     engine = get_engine()
     inserted = 0
     with engine.begin() as conn:
@@ -182,6 +212,15 @@ def enqueue_comment_tasks(
 
 
 def claim_next_comment_task() -> dict[str, Any] | None:
+    """
+    Блокирует и забирает следующую задачу на обработку комментария.
+
+    Args:
+        None: Функция не принимает аргументов.
+
+    Returns:
+        dict[str, Any] | None: Словарь с данными задачи или `None`, если очередь пуста.
+    """
     engine = get_engine()
     with engine.begin() as conn:
         row = conn.execute(
@@ -227,6 +266,18 @@ def mark_comment_task_done(
     reply_text: str | None,
     reply_comment_id: str | None = None,
 ) -> None:
+    """
+    Помечает задачу комментария как успешно обработанную.
+
+    Args:
+        task_id (int): Идентификатор задачи.
+        reply_mode_snapshot (str): Режим ответа, использованный при обработке.
+        reply_text (str | None): Текст подготовленного ответа.
+        reply_comment_id (str | None, optional): Идентификатор опубликованного reply-комментария.
+
+    Returns:
+        None: Ничего не возвращает.
+    """
     engine = get_engine()
     with engine.begin() as conn:
         conn.execute(
@@ -254,6 +305,16 @@ def mark_comment_task_done(
 
 
 def mark_comment_task_error(task_id: int, error_message: str) -> None:
+    """
+    Помечает задачу комментария как завершившуюся ошибкой.
+
+    Args:
+        task_id (int): Идентификатор задачи.
+        error_message (str): Текст ошибки для сохранения в БД.
+
+    Returns:
+        None: Ничего не возвращает.
+    """
     engine = get_engine()
     with engine.begin() as conn:
         conn.execute(
@@ -276,6 +337,15 @@ def mark_comment_task_error(task_id: int, error_message: str) -> None:
 
 
 def get_comment_reply_mode() -> str:
+    """
+    Возвращает текущий режим ответа на комментарии.
+
+    Args:
+        None: Функция не принимает аргументов.
+
+    Returns:
+        str: Значение режима `off`, `draft` или `auto`.
+    """
     env_default = _normalize_reply_mode(os.getenv("IG_REPLY_MODE", "draft"))
     engine = get_engine()
     with engine.begin() as conn:
@@ -294,6 +364,15 @@ def get_comment_reply_mode() -> str:
 
 
 def set_comment_reply_mode(mode: str) -> str:
+    """
+    Обновляет сохранённый режим ответа на комментарии.
+
+    Args:
+        mode (str): Новое значение режима.
+
+    Returns:
+        str: Нормализованное значение режима, сохранённое в БД.
+    """
     normalized = _normalize_reply_mode(mode)
     engine = get_engine()
     with engine.begin() as conn:
@@ -313,6 +392,15 @@ def set_comment_reply_mode(mode: str) -> str:
 
 
 def _normalize_reply_mode(mode: str) -> str:
+    """
+    Приводит режим ответа к поддерживаемому набору значений.
+
+    Args:
+        mode (str): Исходное значение режима.
+
+    Returns:
+        str: Нормализованное значение `off`, `draft` или `auto`.
+    """
     mode = (mode or "").strip().lower()
     if mode in {"off", "draft", "auto"}:
         return mode
@@ -320,12 +408,30 @@ def _normalize_reply_mode(mode: str) -> str:
 
 
 def _to_json(value: Any) -> str:
+    """
+    Сериализует произвольное значение в JSON-строку.
+
+    Args:
+        value (Any): Значение для сериализации.
+
+    Returns:
+        str: JSON-строка без ASCII-экранирования Unicode.
+    """
     import json
 
     return json.dumps(value, ensure_ascii=False)
 
 
 def _clean_str(value: Any) -> str | None:
+    """
+    Нормализует строковое значение из внешнего payload.
+
+    Args:
+        value (Any): Исходное значение.
+
+    Returns:
+        str | None: Очищенная строка или `None`, если после trim она пуста.
+    """
     if value is None:
         return None
     text_value = str(value).strip()

@@ -30,6 +30,20 @@ class DifyChatAdapter:
         max_output_chars: int = 1200,
         timeout_seconds: int = 30,
     ) -> None:
+        """
+        Инициализирует адаптер для Dify Chat API.
+
+        Args:
+            api_key (str): API-ключ опубликованного Dify-приложения.
+            base_url (str, optional): Базовый URL Dify API.
+            response_mode (str, optional): Режим ответа Dify, например `blocking`.
+            max_input_chars (int, optional): Максимальная длина входного текста.
+            max_output_chars (int, optional): Максимальная длина итогового ответа.
+            timeout_seconds (int, optional): Таймаут HTTP-запроса к Dify.
+
+        Returns:
+            None: Ничего не возвращает.
+        """
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.response_mode = response_mode or "blocking"
@@ -38,6 +52,20 @@ class DifyChatAdapter:
         self.timeout_seconds = max(5, timeout_seconds)
 
     def reply(self, user_id: int | str, text: str) -> str:
+        """
+        Отправляет пользовательский текст в Dify и возвращает сгенерированный ответ.
+
+        Args:
+            user_id (int | str): Идентификатор пользователя в контексте Dify.
+            text (str): Текст запроса.
+
+        Returns:
+            str: Ответ Dify или понятное пользователю сообщение об ошибке.
+
+        Raises:
+            LLMUserFacingError: Если Dify вернул ошибку, которую нужно показать пользователю.
+            RuntimeError: Если Dify вернул неожиданный JSON-формат.
+        """
         text = (text or "").strip()
         if not text:
             return "Пустое сообщение."
@@ -175,6 +203,16 @@ def build_dify_chat_adapter_from_env(
     read_env_var: EnvReader,
     read_env_var_optional: EnvOptionalReader,
 ) -> DifyChatAdapter | None:
+    """
+    Создаёт Dify chat adapter на основе переменных окружения.
+
+    Args:
+        read_env_var (EnvReader): Функция чтения обязательной переменной окружения.
+        read_env_var_optional (EnvOptionalReader): Функция чтения необязательной переменной окружения.
+
+    Returns:
+        DifyChatAdapter | None: Готовый адаптер или `None`, если ключ Dify не настроен.
+    """
     try:
         api_key = read_env_var("DIFY_API_KEY")
     except (KeyError, ValueError, FileNotFoundError) as exc:
@@ -206,6 +244,18 @@ def send_comment_to_dify(
     author: str,
     comment_id: str,
 ) -> bool:
+    """
+    Отправляет комментарий в Dify webhook как побочный интеграционный вызов.
+
+    Args:
+        platform (str): Имя платформы-источника комментария.
+        text (str): Текст комментария.
+        author (str): Имя автора комментария.
+        comment_id (str): Идентификатор комментария.
+
+    Returns:
+        bool: `True`, если webhook вызван успешно, иначе `False`.
+    """
     webhook_url = (os.getenv("DIFY_WEBHOOK_URL") or "").strip()
 
     if not webhook_url:

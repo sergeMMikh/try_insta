@@ -24,6 +24,17 @@ def _read_int_optional(
     name: str,
     default: int,
 ) -> int:
+    """
+    Читает целочисленную переменную окружения с запасным значением.
+
+    Args:
+        read_env_var_optional (EnvOptionalReader): Функция чтения необязательной переменной окружения.
+        name (str): Имя переменной окружения.
+        default (int): Значение по умолчанию, если переменная отсутствует или некорректна.
+
+    Returns:
+        int: Прочитанное или резервное целочисленное значение.
+    """
     raw_value = read_env_var_optional(name, str(default))
     try:
         return int(raw_value or str(default))
@@ -36,6 +47,16 @@ def load_app_settings(
     read_env_var: EnvReader,
     read_env_var_optional: EnvOptionalReader,
 ) -> AppSettings:
+    """
+    Собирает настройки приложения из переменных окружения.
+
+    Args:
+        read_env_var (EnvReader): Функция чтения обязательной переменной окружения.
+        read_env_var_optional (EnvOptionalReader): Функция чтения необязательной переменной окружения.
+
+    Returns:
+        AppSettings: Объект с настройками Telegram-авторизации и LLM.
+    """
     bot_token = read_env_var("BOT_TOKEN")
 
     try:

@@ -360,6 +360,15 @@ class _LangfuseClientAdapter:
 
 @lru_cache(maxsize=1)
 def get_langfuse_client() -> Any | None:
+    """
+    Создаёт и кэширует клиент Langfuse на основе переменных окружения.
+
+    Args:
+        None: Функция не принимает аргументов.
+
+    Returns:
+        Any | None: Адаптированный клиент Langfuse или `None`, если интеграция не настроена.
+    """
     if Langfuse is None:
         logger.warning("Langfuse SDK is not installed")
         return None
@@ -395,6 +404,15 @@ def get_langfuse_client() -> Any | None:
 
 
 def build_trace_context(seed: str | None) -> dict[str, str] | None:
+    """
+    Строит trace context для повторяемой трассировки по стабильному seed.
+
+    Args:
+        seed (str | None): Стабильная строка для генерации `trace_id`.
+
+    Returns:
+        dict[str, str] | None: Контекст трассировки для Langfuse или `None`, если клиент недоступен.
+    """
     client = get_langfuse_client()
     if client is None or not seed:
         return None
@@ -413,6 +431,15 @@ def build_trace_context(seed: str | None) -> dict[str, str] | None:
 
 
 def get_trace_url(trace_id: str | None) -> str | None:
+    """
+    Возвращает URL для открытия трейса в интерфейсе Langfuse.
+
+    Args:
+        trace_id (str | None): Идентификатор трейса.
+
+    Returns:
+        str | None: Ссылка на trace или `None`, если её нельзя построить.
+    """
     client = get_langfuse_client()
     if client is None or not trace_id:
         return None
@@ -432,6 +459,19 @@ def propagate_langfuse_attributes(
     tags: list[str] | None = None,
     trace_name: str | None = None,
 ):
+    """
+    Добавляет пользовательские атрибуты к текущей трассировке Langfuse.
+
+    Args:
+        user_id (str | None, optional): Идентификатор пользователя для trace.
+        session_id (str | None, optional): Идентификатор сессии или треда.
+        metadata (dict[str, Any] | None, optional): Дополнительные метаданные trace.
+        tags (list[str] | None, optional): Набор тегов для фильтрации trace.
+        trace_name (str | None, optional): Человекочитаемое имя trace.
+
+    Returns:
+        Any: Контекстный менеджер, безопасный даже при выключенной интеграции.
+    """
     client = get_langfuse_client()
     if client is None:
         return nullcontext()
@@ -456,6 +496,16 @@ def propagate_langfuse_attributes(
 
 
 def update_observation(observation: Any, **kwargs: Any) -> None:
+    """
+    Безопасно обновляет текущую observation/span в Langfuse.
+
+    Args:
+        observation (Any): Observation-объект Langfuse.
+        **kwargs (Any): Поля для обновления observation.
+
+    Returns:
+        None: Ничего не возвращает.
+    """
     if observation is None:
         return
 
@@ -466,6 +516,15 @@ def update_observation(observation: Any, **kwargs: Any) -> None:
 
 
 def serialize_for_langfuse(value: Any) -> Any:
+    """
+    Преобразует произвольное Python-значение в сериализуемый вид для Langfuse.
+
+    Args:
+        value (Any): Исходное значение.
+
+    Returns:
+        Any: Значение, пригодное для отправки в Langfuse metadata или input/output.
+    """
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, bytes):
