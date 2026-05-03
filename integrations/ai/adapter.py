@@ -4,9 +4,12 @@ import socket
 import threading
 import time
 from collections import defaultdict, deque
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Deque
 from urllib import error, request
+
+from integrations.langfuse_support import get_langfuse_client, update_observation
 
 
 logger = logging.getLogger(__name__)
@@ -137,59 +140,130 @@ class LLMAdapter:
             method="POST",
         )
 
-        try:
-            with request.urlopen(req, timeout=self.timeout_seconds) as response:
-                data = json.loads(response.read().decode("utf-8"))
-        except error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="ignore")
-            logger.error("LLM HTTP error %s: %s", exc.code, body)
-            api_code = None
+        langfuse = get_langfuse_client()
+        observation_cm = (
+            langfuse.start_as_current_observation(
+                as_type="generation",
+                name="openai.chat.completions",
+                input=messages,
+                model=self.model,
+                model_parameters={
+                    "temperature": 0.5,
+                    "max_tokens": 350,
+                },
+                metadata={
+                    "provider": "openai",
+                    "base_url": self.base_url,
+                },
+            )
+            if langfuse is not None
+            else nullcontext(None)
+        )
+
+        with observation_cm as observation:
             try:
-                payload = json.loads(body)
-                api_code = payload.get("error", {}).get("code")
-            except Exception:
-                pass
+                with request.urlopen(req, timeout=self.timeout_seconds) as response:
+                    data = json.loads(response.read().decode("utf-8"))
+            except error.HTTPError as exc:
+                body = exc.read().decode("utf-8", errors="ignore")
+                logger.error("LLM HTTP error %s: %s", exc.code, body)
+                update_observation(
+                    observation,
+                    level="ERROR",
+                    status_message=f"HTTP {exc.code}",
+                    output={"error_body": body[:4000]},
+                )
 
-            if exc.code == 401:
-                raise LLMUserFacingError(
-                    "Ошибка LLM API: неверный ключ или нет доступа к модели."
-                ) from exc
-            if exc.code == 429 and api_code == "insufficient_quota":
-                raise LLMUserFacingError(
-                    "Квота LLM закончилась или не подключен API billing."
-                ) from exc
-            if exc.code == 429:
-                raise LLMUserFacingError(
-                    "Сервис LLM временно ограничивает запросы. Попробуйте чуть позже."
-                ) from exc
-            if 500 <= exc.code < 600:
-                raise LLMUserFacingError(
-                    "Сервис LLM временно недоступен. Попробуйте позже."
-                ) from exc
-            raise
-        except error.URLError as exc:
-            logger.error("LLM network error: %s", exc)
-            raise LLMUserFacingError(
-                "Нет соединения с LLM API или запрос истек по времени."
-            ) from exc
-        except socket.timeout as exc:
-            logger.error("LLM timeout: %s", exc)
-            raise LLMUserFacingError(
-                "LLM отвечает слишком долго. Попробуйте еще раз."
-            ) from exc
+                api_code = None
+                try:
+                    error_payload = json.loads(body)
+                    api_code = error_payload.get("error", {}).get("code")
+                except Exception:
+                    pass
 
+                if exc.code == 401:
+                    raise LLMUserFacingError(
+                        "Ошибка LLM API: неверный ключ или нет доступа к модели."
+                    ) from exc
+                if exc.code == 429 and api_code == "insufficient_quota":
+                    raise LLMUserFacingError(
+                        "Квота LLM закончилась или не подключен API billing."
+                    ) from exc
+                if exc.code == 429:
+                    raise LLMUserFacingError(
+                        "Сервис LLM временно ограничивает запросы. Попробуйте чуть позже."
+                    ) from exc
+                if 500 <= exc.code < 600:
+                    raise LLMUserFacingError(
+                        "Сервис LLM временно недоступен. Попробуйте позже."
+                    ) from exc
+                raise
+            except error.URLError as exc:
+                logger.error("LLM network error: %s", exc)
+                update_observation(
+                    observation,
+                    level="ERROR",
+                    status_message="Network error",
+                )
+                raise LLMUserFacingError(
+                    "Нет соединения с LLM API или запрос истек по времени."
+                ) from exc
+            except socket.timeout as exc:
+                logger.error("LLM timeout: %s", exc)
+                update_observation(
+                    observation,
+                    level="ERROR",
+                    status_message="Timeout",
+                )
+                raise LLMUserFacingError(
+                    "LLM отвечает слишком долго. Попробуйте еще раз."
+                ) from exc
+
+            try:
+                content = data["choices"][0]["message"]["content"]
+            except (KeyError, IndexError, TypeError) as exc:
+                logger.error("Unexpected LLM response format: %r", data)
+                update_observation(
+                    observation,
+                    level="ERROR",
+                    status_message="Unexpected response format",
+                    output=data,
+                )
+                raise RuntimeError("Unexpected LLM response format") from exc
+
+            if isinstance(content, list):
+                parts: list[str] = []
+                for item in content:
+                    if isinstance(item, dict) and item.get("type") == "text":
+                        parts.append(str(item.get("text", "")))
+                content = "\n".join(part for part in parts if part)
+
+            text = str(content).strip() or "Пустой ответ от модели."
+            update_observation(
+                observation,
+                output=text,
+                usage_details=_extract_usage_details(data.get("usage")),
+                metadata={
+                    "provider": "openai",
+                    "response_id": str(data.get("id") or ""),
+                },
+            )
+            return text
+
+
+def _extract_usage_details(raw_usage: object) -> dict[str, int] | None:
+    if not isinstance(raw_usage, dict):
+        return None
+
+    usage_details: dict[str, int] = {}
+    for source_key, target_key in (
+        ("prompt_tokens", "input"),
+        ("completion_tokens", "output"),
+        ("total_tokens", "total"),
+    ):
+        value = raw_usage.get(source_key)
         try:
-            content = data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError) as exc:
-            logger.error("Unexpected LLM response format: %r", data)
-            raise RuntimeError("Unexpected LLM response format") from exc
-
-        if isinstance(content, list):
-            parts: list[str] = []
-            for item in content:
-                if isinstance(item, dict) and item.get("type") == "text":
-                    parts.append(str(item.get("text", "")))
-            content = "\n".join(part for part in parts if part)
-
-        text = str(content).strip()
-        return text or "Пустой ответ от модели."
+            usage_details[target_key] = int(value)
+        except (TypeError, ValueError):
+            continue
+    return usage_details or None

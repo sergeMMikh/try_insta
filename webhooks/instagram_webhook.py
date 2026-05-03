@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import threading
+from contextlib import nullcontext
 from typing import Any
 
 from dotenv import load_dotenv
@@ -17,6 +18,14 @@ from db import (
     insert_ig_event,
 )
 from integrations.instagram import extract_comment_tasks
+from integrations.langfuse_support import (
+    build_trace_context,
+    get_langfuse_client,
+    get_trace_url,
+    propagate_langfuse_attributes,
+    serialize_for_langfuse,
+    update_observation,
+)
 from workers.comments_worker import CommentsWorker
 
 
@@ -64,28 +73,62 @@ async def verify_webhook(
     mode_value = hub_mode or hub_mode_alt
     verify_token_value = hub_verify_token or hub_verify_token_alt
     challenge_value = hub_challenge or hub_challenge_alt
+    langfuse = get_langfuse_client()
+    observation_cm = (
+        langfuse.start_as_current_observation(
+            as_type="tool",
+            name="instagram.webhook.verify",
+            input={
+                "mode": mode_value,
+                "challenge_length": len(challenge_value),
+            },
+            metadata={
+                "provider": "instagram",
+                "route": "/webhook",
+            },
+        )
+        if langfuse is not None
+        else nullcontext(None)
+    )
 
-    expected_token = (os.getenv("META_VERIFY_TOKEN") or "").strip()
-    if not expected_token:
-        logger.error("Webhook verification failed: META_VERIFY_TOKEN is not configured")
-        raise HTTPException(status_code=500, detail="META_VERIFY_TOKEN is not configured")
+    with observation_cm as observation:
+        expected_token = (os.getenv("META_VERIFY_TOKEN") or "").strip()
+        if not expected_token:
+            logger.error("Webhook verification failed: META_VERIFY_TOKEN is not configured")
+            update_observation(
+                observation,
+                level="ERROR",
+                status_message="META_VERIFY_TOKEN is not configured",
+                output={"accepted": False, "status_code": 500},
+            )
+            raise HTTPException(status_code=500, detail="META_VERIFY_TOKEN is not configured")
 
-    if mode_value != "subscribe" or verify_token_value != expected_token:
-        logger.warning(
-            "Webhook verification rejected: mode=%r token_len=%s expected_token_len=%s challenge_len=%s",
+        if mode_value != "subscribe" or verify_token_value != expected_token:
+            logger.warning(
+                "Webhook verification rejected: mode=%r token_len=%s expected_token_len=%s challenge_len=%s",
+                mode_value,
+                len(verify_token_value),
+                len(expected_token),
+                len(challenge_value),
+            )
+            update_observation(
+                observation,
+                level="WARNING",
+                status_message="Webhook verification rejected",
+                output={"accepted": False, "status_code": 403},
+            )
+            raise HTTPException(status_code=403, detail="Webhook verification failed")
+
+        logger.info(
+            "Webhook verification accepted: mode=%r challenge_len=%s",
             mode_value,
-            len(verify_token_value),
-            len(expected_token),
             len(challenge_value),
         )
-        raise HTTPException(status_code=403, detail="Webhook verification failed")
-
-    logger.info(
-        "Webhook verification accepted: mode=%r challenge_len=%s",
-        mode_value,
-        len(challenge_value),
-    )
-    return PlainTextResponse(challenge_value)
+        update_observation(
+            observation,
+            output={"accepted": True, "challenge_length": len(challenge_value)},
+        )
+        return PlainTextResponse(challenge_value)
 
 
 @app.post("/")
@@ -112,24 +155,72 @@ async def receive_webhook(request: Request) -> JSONResponse:
         headers=_extract_headers(request),
         signature_valid=signature_valid,
     )
-    tasks = extract_comment_tasks(payload)
-    created_count = enqueue_comment_tasks(tasks, source_event_id=event_id)
+    langfuse = get_langfuse_client()
+    trace_context = build_trace_context(f"instagram-event:{event_id}")
+    observation_cm = (
+        langfuse.start_as_current_observation(
+            as_type="tool",
+            name="instagram.webhook.receive",
+            trace_context=trace_context,
+            input={
+                "payload": serialize_for_langfuse(payload),
+                "headers": serialize_for_langfuse(_extract_headers(request)),
+            },
+            metadata={
+                "provider": "instagram",
+                "event_id": str(event_id),
+                "signature_valid": str(signature_valid),
+            },
+        )
+        if langfuse is not None
+        else nullcontext(None)
+    )
 
-    logger.info(
-        "Webhook processed: event_id=%s object=%s tasks_seen=%s tasks_created=%s",
-        event_id,
-        payload.get("object"),
-        len(tasks),
-        created_count,
-    )
-    return JSONResponse(
-        {
-            "ok": True,
-            "event_id": event_id,
-            "comment_tasks_seen": len(tasks),
-            "comment_tasks_created": created_count,
-        }
-    )
+    with observation_cm as observation:
+        trace_url = (
+            get_trace_url(getattr(observation, "trace_id", None))
+            if observation is not None
+            else None
+        )
+        if trace_url:
+            logger.info("Langfuse webhook trace: event_id=%s url=%s", event_id, trace_url)
+
+        with propagate_langfuse_attributes(
+            session_id=f"instagram-event:{event_id}",
+            metadata={
+                "service": "webhook",
+                "provider": "instagram",
+                "event_id": event_id,
+            },
+            trace_name="instagram-webhook",
+        ):
+            tasks = extract_comment_tasks(payload)
+            created_count = enqueue_comment_tasks(tasks, source_event_id=event_id)
+
+            response_payload = {
+                "ok": True,
+                "event_id": event_id,
+                "comment_tasks_seen": len(tasks),
+                "comment_tasks_created": created_count,
+            }
+            update_observation(
+                observation,
+                output=serialize_for_langfuse(response_payload),
+                metadata={
+                    "object_type": str(payload.get("object") or ""),
+                    "tasks_seen": str(len(tasks)),
+                    "tasks_created": str(created_count),
+                },
+            )
+
+            logger.info(
+                "Webhook processed: event_id=%s object=%s tasks_seen=%s tasks_created=%s",
+                event_id,
+                payload.get("object"),
+                len(tasks),
+                created_count,
+            )
+            return JSONResponse(response_payload)
 
 
 def _validate_signature(request: Request, raw_body: bytes) -> bool | None:

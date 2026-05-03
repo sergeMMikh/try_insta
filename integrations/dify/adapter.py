@@ -1,10 +1,16 @@
 import logging
 import os
+from contextlib import nullcontext
 from typing import Callable
 
 import requests
 
 from integrations.ai.adapter import LLMUserFacingError
+from integrations.langfuse_support import (
+    get_langfuse_client,
+    serialize_for_langfuse,
+    update_observation,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -46,65 +52,123 @@ class DifyChatAdapter:
             "user": str(user_id),
         }
 
-        try:
-            response = requests.post(
-                f"{self.base_url}/chat-messages",
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
+        langfuse = get_langfuse_client()
+        observation_cm = (
+            langfuse.start_as_current_observation(
+                as_type="generation",
+                name="dify.chat",
+                input=payload,
+                model="dify-chat",
+                model_parameters={
+                    "response_mode": self.response_mode,
                 },
-                json=payload,
-                timeout=self.timeout_seconds,
+                metadata={
+                    "provider": "dify",
+                    "base_url": self.base_url,
+                },
             )
-            response.raise_for_status()
-        except requests.exceptions.HTTPError as exc:
-            status_code = exc.response.status_code if exc.response is not None else None
-            body = exc.response.text if exc.response is not None else ""
-            logger.error("Dify chat HTTP error %s: %s", status_code, body)
+            if langfuse is not None
+            else nullcontext(None)
+        )
 
-            if status_code == 401:
-                raise LLMUserFacingError(
-                    "Ошибка Dify API: неверный ключ или нет доступа к приложению."
-                ) from exc
-            if status_code == 404:
-                raise LLMUserFacingError(
-                    "Dify API не найден. Проверьте DIFY_API_BASE_URL и тип приложения."
-                ) from exc
-            if status_code == 429:
-                raise LLMUserFacingError(
-                    "Dify временно ограничивает запросы. Попробуйте чуть позже."
-                ) from exc
-            if status_code is not None and 500 <= status_code < 600:
-                raise LLMUserFacingError(
-                    "Dify временно недоступен. Попробуйте позже."
-                ) from exc
-            raise
-        except requests.exceptions.Timeout as exc:
-            logger.error("Dify chat timeout: %s", exc)
-            raise LLMUserFacingError(
-                "Dify отвечает слишком долго. Попробуйте еще раз."
-            ) from exc
-        except requests.exceptions.RequestException as exc:
-            logger.error("Dify chat network error: %s", exc)
-            raise LLMUserFacingError(
-                "Нет соединения с Dify API или запрос истек по времени."
-            ) from exc
+        with observation_cm as observation:
+            try:
+                response = requests.post(
+                    f"{self.base_url}/chat-messages",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                    timeout=self.timeout_seconds,
+                )
+                response.raise_for_status()
+            except requests.exceptions.HTTPError as exc:
+                status_code = exc.response.status_code if exc.response is not None else None
+                body = exc.response.text if exc.response is not None else ""
+                logger.error("Dify chat HTTP error %s: %s", status_code, body)
+                update_observation(
+                    observation,
+                    level="ERROR",
+                    status_message=f"HTTP {status_code}",
+                    output={"error_body": body[:4000]},
+                )
 
-        try:
-            data = response.json()
-        except ValueError as exc:
-            logger.error("Invalid Dify chat JSON response: %r", response.text)
-            raise RuntimeError("Invalid Dify response format") from exc
+                if status_code == 401:
+                    raise LLMUserFacingError(
+                        "Ошибка Dify API: неверный ключ или нет доступа к приложению."
+                    ) from exc
+                if status_code == 404:
+                    raise LLMUserFacingError(
+                        "Dify API не найден. Проверьте DIFY_API_BASE_URL и тип приложения."
+                    ) from exc
+                if status_code == 429:
+                    raise LLMUserFacingError(
+                        "Dify временно ограничивает запросы. Попробуйте чуть позже."
+                    ) from exc
+                if status_code is not None and 500 <= status_code < 600:
+                    raise LLMUserFacingError(
+                        "Dify временно недоступен. Попробуйте позже."
+                    ) from exc
+                raise
+            except requests.exceptions.Timeout as exc:
+                logger.error("Dify chat timeout: %s", exc)
+                update_observation(
+                    observation,
+                    level="ERROR",
+                    status_message="Timeout",
+                )
+                raise LLMUserFacingError(
+                    "Dify отвечает слишком долго. Попробуйте еще раз."
+                ) from exc
+            except requests.exceptions.RequestException as exc:
+                logger.error("Dify chat network error: %s", exc)
+                update_observation(
+                    observation,
+                    level="ERROR",
+                    status_message="Network error",
+                )
+                raise LLMUserFacingError(
+                    "Нет соединения с Dify API или запрос истек по времени."
+                ) from exc
 
-        logger.debug("Dify chat response: %s", data)
-        answer = str(data.get("answer") or "").strip()
-        if not answer:
-            logger.error("Unexpected Dify chat response format: %r", data)
-            raise RuntimeError("Unexpected Dify response format")
+            try:
+                data = response.json()
+            except ValueError as exc:
+                logger.error("Invalid Dify chat JSON response: %r", response.text)
+                update_observation(
+                    observation,
+                    level="ERROR",
+                    status_message="Invalid JSON response",
+                    output={"raw_response": response.text[:4000]},
+                )
+                raise RuntimeError("Invalid Dify response format") from exc
 
-        if len(answer) > self.max_output_chars:
-            answer = answer[: self.max_output_chars].rstrip() + "..."
-        return answer
+            logger.debug("Dify chat response: %s", data)
+            answer = str(data.get("answer") or "").strip()
+            if not answer:
+                logger.error("Unexpected Dify chat response format: %r", data)
+                update_observation(
+                    observation,
+                    level="ERROR",
+                    status_message="Missing answer field",
+                    output=serialize_for_langfuse(data),
+                )
+                raise RuntimeError("Unexpected Dify response format")
+
+            if len(answer) > self.max_output_chars:
+                answer = answer[: self.max_output_chars].rstrip() + "..."
+
+            update_observation(
+                observation,
+                output=answer,
+                metadata={
+                    "provider": "dify",
+                    "conversation_id": str(data.get("conversation_id") or ""),
+                    "message_id": str(data.get("message_id") or ""),
+                },
+            )
+            return answer
 
 
 def build_dify_chat_adapter_from_env(

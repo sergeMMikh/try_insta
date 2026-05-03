@@ -2,6 +2,7 @@ import logging
 import os
 import sys
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -23,6 +24,14 @@ from config import read_env_var, read_env_var_optional
 from integrations.ai import build_llm_adapter_from_env
 from integrations.dify import build_dify_chat_adapter_from_env, send_comment_to_dify
 from integrations.instagram import InstagramGraphClient, reply_to_comment
+from integrations.langfuse_support import (
+    build_trace_context,
+    get_langfuse_client,
+    get_trace_url,
+    propagate_langfuse_attributes,
+    serialize_for_langfuse,
+    update_observation,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -66,6 +75,24 @@ class CommentsWorker:
         task_id = int(task["id"])
         comment_id = str(task["comment_id"])
         mode = get_comment_reply_mode()
+        langfuse = get_langfuse_client()
+        trace_seed = _build_task_trace_seed(task)
+        observation_cm = (
+            langfuse.start_as_current_observation(
+                as_type="agent",
+                name="instagram.comment.process",
+                trace_context=build_trace_context(trace_seed),
+                input=serialize_for_langfuse(task),
+                metadata={
+                    "provider": "instagram",
+                    "comment_id": comment_id,
+                    "reply_provider": self.reply_provider,
+                },
+            )
+            if langfuse is not None
+            else nullcontext(None)
+        )
+
         logger.info(
             "Processing comment task id=%s comment_id=%s mode=%s attempts=%s",
             task_id,
@@ -74,66 +101,125 @@ class CommentsWorker:
             task.get("attempts"),
         )
 
-        try:
-            if mode == "off":
-                mark_comment_task_done(
-                    task_id,
-                    reply_mode_snapshot=mode,
-                    reply_text=None,
-                    reply_comment_id=None,
-                )
-                return
-
-            if _is_self_authored_comment(task):
+        with observation_cm as observation:
+            trace_url = (
+                get_trace_url(getattr(observation, "trace_id", None))
+                if observation is not None
+                else None
+            )
+            if trace_url:
                 logger.info(
-                    "Skipping self-authored comment id=%s username=%s",
+                    "Langfuse comment trace: comment_id=%s url=%s",
                     comment_id,
-                    task.get("commenter_username"),
-                )
-                mark_comment_task_done(
-                    task_id,
-                    reply_mode_snapshot=mode,
-                    reply_text=None,
-                    reply_comment_id=None,
-                )
-                return
-
-            if self.reply_provider != "dify":
-                send_comment_to_dify(
-                    platform="instagram",
-                    text=str(task.get("comment_text") or "").strip(),
-                    author=str(task.get("commenter_username") or "").strip(),
-                    comment_id=comment_id,
+                    trace_url,
                 )
 
-            reply_text = self._build_reply(task)
+            with propagate_langfuse_attributes(
+                user_id=_langfuse_user_id(task),
+                session_id=f"instagram-comment:{comment_id}",
+                metadata={
+                    "service": "worker",
+                    "provider": "instagram",
+                    "reply_provider": self.reply_provider,
+                    "reply_mode": mode,
+                },
+                trace_name="instagram-comment-worker",
+            ):
+                try:
+                    if mode == "off":
+                        mark_comment_task_done(
+                            task_id,
+                            reply_mode_snapshot=mode,
+                            reply_text=None,
+                            reply_comment_id=None,
+                        )
+                        update_observation(
+                            observation,
+                            level="DEBUG",
+                            status_message="Reply mode is off",
+                            output={"status": "skipped", "reason": "reply_mode_off"},
+                        )
+                        return
 
-            if mode == "draft":
-                logger.info("Draft reply for comment_id=%s: %s", comment_id, reply_text)
-                mark_comment_task_done(
-                    task_id,
-                    reply_mode_snapshot=mode,
-                    reply_text=reply_text,
-                    reply_comment_id=None,
-                )
-                return
+                    if _is_self_authored_comment(task):
+                        logger.info(
+                            "Skipping self-authored comment id=%s username=%s",
+                            comment_id,
+                            task.get("commenter_username"),
+                        )
+                        mark_comment_task_done(
+                            task_id,
+                            reply_mode_snapshot=mode,
+                            reply_text=None,
+                            reply_comment_id=None,
+                        )
+                        update_observation(
+                            observation,
+                            level="DEBUG",
+                            status_message="Skipping self-authored comment",
+                            output={"status": "skipped", "reason": "self_authored"},
+                        )
+                        return
 
-            sent = reply_to_comment(self.graph, comment_id, reply_text)
-            reply_comment_id = str(sent.get("id") or "") or None
-            mark_comment_task_done(
-                task_id,
-                reply_mode_snapshot=mode,
-                reply_text=reply_text,
-                reply_comment_id=reply_comment_id,
-            )
-            logger.info(
-                "Auto reply sent for comment_id=%s reply_comment_id=%s",
-                comment_id,
-                reply_comment_id,
-            )
-        except Exception as exc:
-            logger.exception("Failed to process comment task id=%s", task_id)
-            mark_comment_task_error(task_id, str(exc))
+                    if self.reply_provider != "dify":
+                        send_comment_to_dify(
+                            platform="instagram",
+                            text=str(task.get("comment_text") or "").strip(),
+                            author=str(task.get("commenter_username") or "").strip(),
+                            comment_id=comment_id,
+                        )
+
+                    reply_text = self._build_reply(task)
+
+                    if mode == "draft":
+                        logger.info("Draft reply for comment_id=%s: %s", comment_id, reply_text)
+                        mark_comment_task_done(
+                            task_id,
+                            reply_mode_snapshot=mode,
+                            reply_text=reply_text,
+                            reply_comment_id=None,
+                        )
+                        update_observation(
+                            observation,
+                            output={
+                                "status": "draft",
+                                "reply_text": reply_text,
+                            },
+                        )
+                        return
+
+                    sent = self._send_reply(comment_id, reply_text)
+                    reply_comment_id = str(sent.get("id") or "") or None
+                    mark_comment_task_done(
+                        task_id,
+                        reply_mode_snapshot=mode,
+                        reply_text=reply_text,
+                        reply_comment_id=reply_comment_id,
+                    )
+                    update_observation(
+                        observation,
+                        output={
+                            "status": "sent",
+                            "reply_text": reply_text,
+                            "reply_comment_id": reply_comment_id,
+                            "graph_response": serialize_for_langfuse(sent),
+                        },
+                    )
+                    logger.info(
+                        "Auto reply sent for comment_id=%s reply_comment_id=%s",
+                        comment_id,
+                        reply_comment_id,
+                    )
+                except Exception as exc:
+                    logger.exception("Failed to process comment task id=%s", task_id)
+                    mark_comment_task_error(task_id, str(exc))
+                    update_observation(
+                        observation,
+                        level="ERROR",
+                        status_message=str(exc)[:200],
+                        output={"status": "error"},
+                        metadata={"error_type": exc.__class__.__name__},
+                    )
 
     def _build_reply(self, task: dict[str, Any]) -> str:
         if self.reply_service is None:
@@ -141,11 +227,45 @@ class CommentsWorker:
 
         prompt = self._build_reply_prompt(task)
         user_key = _safe_user_key(task.get("comment_id"))
-        reply = self.reply_service.reply(user_key, prompt).strip()
-        reply = " ".join(reply.split())
-        if not reply:
-            reply = "Спасибо за комментарий!"
-        return reply[:1000]
+        langfuse = get_langfuse_client()
+        observation_cm = (
+            langfuse.start_as_current_observation(
+                as_type="chain",
+                name="instagram.reply.build",
+                input={
+                    "comment_id": str(task.get("comment_id") or ""),
+                    "provider": self.reply_provider,
+                    "prompt": prompt,
+                },
+                metadata={
+                    "provider": self.reply_provider,
+                    "commenter_username": str(task.get("commenter_username") or ""),
+                },
+            )
+            if langfuse is not None
+            else nullcontext(None)
+        )
+        with observation_cm as observation:
+            try:
+                reply = self.reply_service.reply(user_key, prompt).strip()
+            except Exception as exc:
+                update_observation(
+                    observation,
+                    level="ERROR",
+                    status_message=str(exc)[:200],
+                    metadata={"error_type": exc.__class__.__name__},
+                )
+                raise
+
+            reply = " ".join(reply.split())
+            if not reply:
+                reply = "Спасибо за комментарий!"
+            reply = reply[:1000]
+            update_observation(
+                observation,
+                output={"reply_text": reply},
+            )
+            return reply
 
     def _build_reply_prompt(self, task: dict[str, Any]) -> str:
         comment_text = str(task.get("comment_text") or "").strip()
@@ -164,6 +284,40 @@ class CommentsWorker:
         if self.reply_provider == "dify":
             return build_dify_chat_adapter_from_env(read_env_var, read_env_var_optional)
         return build_llm_adapter_from_env(read_env_var, read_env_var_optional)
+
+    def _send_reply(self, comment_id: str, reply_text: str) -> dict[str, Any]:
+        langfuse = get_langfuse_client()
+        observation_cm = (
+            langfuse.start_as_current_observation(
+                as_type="tool",
+                name="instagram.reply.send",
+                input={
+                    "comment_id": comment_id,
+                    "reply_text": reply_text,
+                },
+                metadata={"provider": "instagram"},
+            )
+            if langfuse is not None
+            else nullcontext(None)
+        )
+
+        with observation_cm as observation:
+            try:
+                sent = reply_to_comment(self.graph, comment_id, reply_text)
+            except Exception as exc:
+                update_observation(
+                    observation,
+                    level="ERROR",
+                    status_message=str(exc)[:200],
+                    metadata={"error_type": exc.__class__.__name__},
+                )
+                raise
+
+            update_observation(
+                observation,
+                output=serialize_for_langfuse(sent),
+            )
+            return sent
 
     def _log_reply_mode_configuration(self) -> None:
         env_mode = (os.getenv("IG_REPLY_MODE") or "").strip().lower() or "<unset>"
@@ -210,6 +364,26 @@ def _read_reply_provider() -> str:
         return value
     logger.warning("Unknown IG_REPLY_PROVIDER=%r, using chat", value)
     return "chat"
+
+
+def _build_task_trace_seed(task: dict[str, Any]) -> str:
+    source_event_id = str(task.get("source_event_id") or "").strip()
+    if source_event_id:
+        return f"instagram-event:{source_event_id}"
+
+    comment_id = str(task.get("comment_id") or "").strip()
+    if comment_id:
+        return f"instagram-comment:{comment_id}"
+
+    return "instagram-comment:unknown"
+
+
+def _langfuse_user_id(task: dict[str, Any]) -> str | None:
+    username = str(task.get("commenter_username") or "").strip()
+    if username:
+        return username
+    comment_id = str(task.get("comment_id") or "").strip()
+    return comment_id or None
 
 
 def _is_self_authored_comment(task: dict[str, Any]) -> bool:
