@@ -7,6 +7,10 @@ Script `run_media_experiment.py` runs a measurable experiment:
 - stores media in PostgreSQL via SQLAlchemy (`media_samples` table);
 - calculates presence ratios for `views`, `likes`, `comments`.
 
+## Architecture
+
+Project architecture is documented with all 4 C4 levels in [docs/c4-architecture.md](docs/c4-architecture.md).
+
 ### Environment variables
 
 - `DATABASE_URL` (or `DABASE_URL`): PostgreSQL DSN, for example

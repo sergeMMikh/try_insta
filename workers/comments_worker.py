@@ -250,12 +250,19 @@ class CommentsWorker:
                 except Exception as exc:
                     logger.exception("Failed to process comment task id=%s", task_id)
                     mark_comment_task_error(task_id, str(exc))
+                    error_message = str(exc)[:500] or "Unknown error"
                     update_observation(
                         observation,
                         level="ERROR",
-                        status_message=str(exc)[:200],
-                        output={"status": "error"},
-                        metadata={"error_type": exc.__class__.__name__},
+                        status_message=error_message[:200],
+                        output={
+                            "status": "error",
+                            "error_message": error_message,
+                        },
+                        metadata={
+                            "error_type": exc.__class__.__name__,
+                            "error_message": error_message[:200],
+                        },
                     )
 
     def _build_reply(self, task: dict[str, Any]) -> str:

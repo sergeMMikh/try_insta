@@ -1,7 +1,7 @@
 import logging
 import os
 from contextlib import nullcontext
-from typing import Callable
+from typing import Any, Callable
 
 import requests
 
@@ -173,8 +173,8 @@ class DifyChatAdapter:
                 raise RuntimeError("Invalid Dify response format") from exc
 
             logger.debug("Dify chat response: %s", data)
-            answer = str(data.get("answer") or "").strip()
-            if not answer:
+            answer = _extract_dify_answer(data)
+            if answer is None:
                 logger.error("Unexpected Dify chat response format: %r", data)
                 update_observation(
                     observation,
@@ -183,6 +183,23 @@ class DifyChatAdapter:
                     output=serialize_for_langfuse(data),
                 )
                 raise RuntimeError("Unexpected Dify response format")
+
+            if not answer:
+                error_message = _build_empty_answer_error_message(data)
+                logger.error("%s: %r", error_message, data)
+                update_observation(
+                    observation,
+                    level="ERROR",
+                    status_message="Empty Dify answer",
+                    output=serialize_for_langfuse(data),
+                    metadata={
+                        "provider": "dify",
+                        "conversation_id": str(data.get("conversation_id") or ""),
+                        "message_id": str(data.get("message_id") or ""),
+                        "mode": str(data.get("mode") or ""),
+                    },
+                )
+                raise RuntimeError(error_message)
 
             if len(answer) > self.max_output_chars:
                 answer = answer[: self.max_output_chars].rstrip() + "..."
@@ -293,3 +310,28 @@ def send_comment_to_dify(
             payload,
         )
         return False
+
+
+def _extract_dify_answer(data: Any) -> str | None:
+    if not isinstance(data, dict):
+        return None
+
+    answer = data.get("answer")
+    if answer is None:
+        return None
+
+    return str(answer).strip()
+
+
+def _build_empty_answer_error_message(data: dict[str, Any]) -> str:
+    mode = str(data.get("mode") or "").strip() or "<unknown>"
+    event = str(data.get("event") or "").strip() or "<unknown>"
+    conversation_id = str(data.get("conversation_id") or "").strip() or "<unknown>"
+
+    return (
+        "Dify returned a successful chat response with an empty answer "
+        f"(event={event}, mode={mode}, conversation_id={conversation_id}). "
+        "Check the Dify app configuration: for Chatflow apps every executed branch "
+        "should emit content through an Answer node; workflow apps should expose "
+        "outputs via the workflow API instead of /chat-messages."
+    )
